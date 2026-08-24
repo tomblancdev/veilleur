@@ -1,0 +1,24 @@
+# Le Veilleur — the watchman under podman Quadlet (/etc/containers/systemd/veilleur.container)
+[Unit]
+Description=Le Veilleur — the watchman
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=ghcr.io/tomblancdev/veilleur:0.2.0
+ContainerName=veilleur
+Network=host
+Environment=VEILLEUR_LISTEN=:8080
+Volume=/etc/veilleur:/etc/veilleur:ro,Z
+Volume=/srv/veilleur/data:/data:Z
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+LogDriver=journald
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target default.target

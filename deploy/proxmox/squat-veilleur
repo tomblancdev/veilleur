@@ -1,0 +1,167 @@
+#!/bin/sh
+# squat-veilleur — the ONLY thing Le Veilleur's ssh key may run on a
+# Proxmox node (forced command in root's authorized_keys):
+#
+#   status              stdout = JSON: this node's view of the cluster,
+#                       its guests, the locks, and its own interactive
+#                       sessions (the one fact only it can answer)
+#   wake <node>         magic packet on the corosync fabric
+#   start <vmid>        start a guest anywhere in the cluster
+#   stop <vmid>         ask a guest to shut down gracefully (never forced)
+#   poweroff            power THIS node off
+#
+# Every argument is validated against this node's own allowlist
+# (/etc/veilleur/door.conf, rendered by ansible). The watchman cannot stop a
+# guest that is not in the graph, and cannot power off a node that has not
+# declared itself on-demand — a 24/7 node's copy simply refuses. The script
+# is identical everywhere; only the conf differs.
+#
+# Reference copy: github.com/tomblancdev/veilleur, deploy/proxmox/.
+set -eu
+
+CONF=${VEILLEUR_DOOR_CONF:-/etc/veilleur/door.conf}
+[ -r "$CONF" ] || { echo "no door conf at $CONF" >&2; exit 2; }
+# shellcheck disable=SC1090
+. "$CONF"
+
+NODE=${NODE:-$(hostname -s)}
+GUESTS=${GUESTS:-}
+WAKE=${WAKE:-}
+MAY_POWEROFF=${MAY_POWEROFF:-no}
+FABRIC_BCAST=${FABRIC_BCAST:-}
+
+deny() { logger -t squat-veilleur "DENIED: $*"; echo "squat-veilleur: refused: $*" >&2; exit 2; }
+
+# a vmid is digits, and must be one this node is allowed to touch
+check_vmid() {
+	echo "$1" | grep -Eq '^[0-9]{1,10}$' || deny "not a vmid: $1"
+	for v in $GUESTS; do [ "$v" = "$1" ] && return 0; done
+	deny "vmid $1 is not in this door's allowlist"
+}
+
+# the mac we are allowed to wake this node with, or nothing
+wake_mac() {
+	for pair in $WAKE; do
+		case "$pair" in
+			"$1="*) echo "${pair#*=}"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+status() {
+	python3 - "$NODE" <<'PY'
+import json, subprocess, sys, time, os
+
+node = sys.argv[1]
+out = {"node": node, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+       "cluster": {"online": 0, "total": 0}, "nodes": {}, "guests": [],
+       "locks": {}, "ttys": 0}
+
+# who is in the cluster, and who is awake
+try:
+    with open("/etc/pve/.members") as f:
+        m = json.load(f)
+    for name, n in m.get("nodelist", {}).items():
+        online = n.get("online") == 1
+        out["nodes"][name] = {"online": online, "ttys": -1}
+        out["cluster"]["total"] += 1
+        if online:
+            out["cluster"]["online"] += 1
+except Exception:
+    pass
+
+# the locks that forbid a sleep, cluster-wide (pmxcfs replicates them)
+out["locks"]["maintenance"] = os.path.exists("/etc/pve/squat-maintenance.lock")
+out["locks"]["converge"] = os.path.exists("/etc/pve/squat-converge.lock")
+
+# interactive sessions on THIS node: a `who` line with a pts/tty. ansible
+# and ssh one-liners register without one and must not count (the same rule
+# squat-sleep learned the hard way, 2026-08-24).
+try:
+    who = subprocess.run(["who"], capture_output=True, text=True, timeout=10).stdout
+    out["ttys"] = sum(1 for line in who.splitlines()
+                      if len(line.split()) > 1 and line.split()[1].startswith(("pts", "tty")))
+except Exception:
+    out["ttys"] = -1
+
+# every guest in the cluster, with the HA flag: an HA resource is the HA
+# manager's to stop, never the watchman's.
+try:
+    raw = subprocess.run(["pvesh", "get", "/cluster/resources", "--type", "vm",
+                          "--output-format", "json"],
+                         capture_output=True, text=True, timeout=30).stdout
+    for r in json.loads(raw or "[]"):
+        out["guests"].append({
+            "vmid": int(r.get("vmid", 0)),
+            "name": r.get("name", ""),
+            "node": r.get("node", ""),
+            "type": "lxc" if r.get("type") == "lxc" else "qemu",
+            "status": r.get("status", "unknown"),
+            "ha": bool(r.get("hastate")),
+        })
+except Exception:
+    pass
+
+json.dump(out, sys.stdout)
+PY
+}
+
+# where does a vmid live, and what is it? prints "<node> <qemu|lxc>"
+locate() {
+	pvesh get /cluster/resources --type vm --output-format json 2>/dev/null | python3 -c '
+import json,sys
+want=int(sys.argv[1])
+for r in json.load(sys.stdin):
+    if int(r.get("vmid",0))==want:
+        print(r.get("node",""), "lxc" if r.get("type")=="lxc" else "qemu")
+        break
+' "$1"
+}
+
+set -- ${SSH_ORIGINAL_COMMAND:-$*}
+case "${1:-}" in
+	status)
+		status
+		;;
+	wake)
+		target=${2:-}
+		[ -n "$target" ] || deny "wake needs a node"
+		mac=$(wake_mac "$target") || deny "this door may not wake $target"
+		[ -n "$FABRIC_BCAST" ] || deny "no fabric broadcast configured"
+		wakeonlan -i "$FABRIC_BCAST" "$mac" >/dev/null 2>&1 \
+			&& logger -t squat-veilleur "magic packet sent to $target ($mac) on $FABRIC_BCAST" \
+			|| deny "wakeonlan to $target failed"
+		echo "woke $target"
+		;;
+	start)
+		check_vmid "${2:-}"
+		set -- "$1" "$2" $(locate "$2")
+		[ -n "${3:-}" ] || deny "vmid $2 is not in the cluster"
+		pvesh create "/nodes/$3/$4/$2/status/start" >/dev/null
+		logger -t squat-veilleur "start $2 on $3"
+		echo "started $2"
+		;;
+	stop)
+		check_vmid "${2:-}"
+		set -- "$1" "$2" $(locate "$2")
+		[ -n "${3:-}" ] || deny "vmid $2 is not in the cluster"
+		# graceful only: never forceStop. A guest that refuses to go is a
+		# report, not a kill (power.md §7).
+		pvesh create "/nodes/$3/$4/$2/status/shutdown" --forceStop 0 --timeout 300 >/dev/null
+		logger -t squat-veilleur "shutdown $2 on $3"
+		echo "stopping $2"
+		;;
+	poweroff)
+		[ "$MAY_POWEROFF" = "yes" ] || deny "this node is not allowed to sleep"
+		logger -t squat-veilleur "powering off $NODE at the watchman's request"
+		# leave through systemd so the RTC alarm hook and the rest of the
+		# shutdown chain run exactly as they do for squat-sleep
+		systemctl poweroff
+		echo "powering off $NODE"
+		;;
+	*)
+		echo "squat-veilleur: status | wake <node> | start <vmid> | stop <vmid> | poweroff" >&2
+		exit 2
+		;;
+esac

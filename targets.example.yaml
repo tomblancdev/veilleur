@@ -1,0 +1,72 @@
+# Le Veilleur — the whole product in one file: the graph, the door, the auth.
+# The lab renders this from its own data; this copy is the documentation.
+
+listen: ":8080"
+base_url: "https://veilleur.example.net"
+data_dir: /data
+tz: Europe/Paris
+house: "Le Squat"
+
+# how often the world is compared to the claims. Every API mutation also
+# kicks a pass at once — this is the floor, not the pulse.
+reconcile_interval: 30s
+# the deadline a claim gets when it asks for none (a target may cap it lower)
+default_hold: 8h
+
+auth:
+  user_header: Remote-User
+  groups_header: Remote-Groups
+  admin_groups: [admins]
+  # identity headers are believed from these addresses ONLY
+  trusted_proxies: ["10.0.0.10"]
+  # machines: lines of `name:role:token`, role = admin | client
+  tokens_file: /etc/veilleur/tokens
+
+# the one credential: an ssh key restricted to `squat-veilleur` on every
+# hypervisor. Each node's own copy of the script carries the allowlist of
+# what it will accept, so this key is not a power-of-attorney over the lab.
+door:
+  mode: ssh          # ssh | mock (mock touches nothing — local hacking only)
+  user: root         # the forced command is the restriction, not the account
+  key_file: /etc/veilleur/door_ed25519
+  timeout: 60s
+  hosts:
+    # control = a 24/7 node: answers cluster-wide questions, sends the
+    # magic packets. At least one is required; two is N+1.
+    - { node: infra1, addr: "10.0.0.11:22", control: true, host_key: "ssh-ed25519 AAAA... root@infra1" }
+    - { node: apps1,  addr: "10.0.0.12:22", control: true, host_key: "ssh-ed25519 AAAA... root@apps1" }
+    # the on-demand node's own door: its ttys, and its poweroff
+    - { node: muscle1, addr: "10.0.0.13:22", host_key: "ssh-ed25519 AAAA... root@muscle1" }
+
+# The graph. A target is up while any claim on it — or on anything that
+# requires it — is held.
+targets:
+  muscle1:
+    kind: node
+    node: muscle1
+    label: "the on-demand tower"
+    on_demand: true      # REQUIRED: a node that has not said this can never be a target
+    wol: true
+    up_timeout: 3m       # WoL -> the cluster sees it
+    down_grace: 10m      # empty this long before the lights go out
+    guards: [human_session, maintenance_lock, converge_lock, cluster_whole]
+
+  pbs:
+    kind: guest
+    vmid: 1002
+    node: muscle1
+    label: "the backup server"
+    requires: [muscle1]
+    up_timeout: 5m
+    down_grace: 1m
+    max_hold: 6h
+
+  console:
+    kind: guest
+    vmid: 5001
+    node: muscle1
+    label: "the games console"
+    requires: [muscle1]
+    up_timeout: 3m
+    down_grace: 2m
+    idle_after: 20m      # the default window for a claim that releases on idleness
