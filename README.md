@@ -80,6 +80,29 @@ refreshed by heartbeats) · `deadline` (the clock alone).
 Humans get a board at `/`: what is up, what holds it up, what is refusing to
 sleep and why, and a *hold it for 2 h* button.
 
+## Reporting from inside
+
+A target can say *"I am in use"* instead of being guessed at. `deploy/agent/veilleur-report`
+is a POSIX shell script (curl, nothing else) that holds an **idle-ruled
+claim** on its own target and refreshes it while an activity check passes:
+
+```sh
+veilleur-report --url https://veilleur.example.net \
+                --target console --activity /usr/local/bin/is-someone-playing
+```
+
+The activity check is whatever "in use" means for that service — exit 0 = in
+use — and it lives with the service, not here. When activity stops the
+reporter simply stops talking; the claim ages out on the server's side and
+**Le Veilleur** decides what to do about it. A reporter that dies cannot slam
+the door, and a brief pause does not cost a restart.
+
+That division is the point, and it was learned the hard way: a guest that
+decides for itself races the watchman. In this design's first week the games
+console's own 20-minute watchdog powered the box off twice *inside a held
+claim*, and the watchman dutifully restarted it each time — two interruptions
+to a real game. **One decider, many reporters.**
+
 ## How it touches machines
 
 One ssh key restricted to one forced command on every hypervisor —

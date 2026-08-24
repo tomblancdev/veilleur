@@ -1,0 +1,105 @@
+#!/bin/sh
+# veilleur-report — the in-guest reporter: it says "I am in use", it does NOT
+# decide anything. While its activity check passes it holds an idle-ruled
+# claim on its own target and keeps it fresh; when activity stops it simply
+# stops talking, and the claim ages out on Le Veilleur's side, which then
+# decides what to do about it.
+#
+# That division is the whole point. A guest that decides for itself races the
+# watchman: on this lab's first afternoon the games console's own 20-minute
+# watchdog powered the box off TWICE inside a held claim, and the watchman
+# dutifully restarted it each time — two interruptions to a real game. One
+# decider, many reporters.
+#
+#   veilleur-report --target console --activity /usr/local/bin/arcade-active
+#
+# The activity check is whatever "in use" means for this service: exit 0 =
+# in use. It lives with the service, not here.
+#
+# Config (env or flags): VEILLEUR_URL, VEILLEUR_TOKEN_FILE, VEILLEUR_TARGET,
+# VEILLEUR_ACTIVITY, VEILLEUR_IDLE_AFTER (default 20m), VEILLEUR_INTERVAL
+# (default 30), VEILLEUR_REASON.
+set -u
+
+URL=${VEILLEUR_URL:-}
+TOKEN_FILE=${VEILLEUR_TOKEN_FILE:-/etc/veilleur/report-token}
+TARGET=${VEILLEUR_TARGET:-}
+ACTIVITY=${VEILLEUR_ACTIVITY:-}
+IDLE_AFTER=${VEILLEUR_IDLE_AFTER:-20m}
+INTERVAL=${VEILLEUR_INTERVAL:-30}
+REASON=${VEILLEUR_REASON:-}
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--url) URL=$2; shift 2 ;;
+		--target) TARGET=$2; shift 2 ;;
+		--activity) ACTIVITY=$2; shift 2 ;;
+		--idle-after) IDLE_AFTER=$2; shift 2 ;;
+		--interval) INTERVAL=$2; shift 2 ;;
+		--reason) REASON=$2; shift 2 ;;
+		--token-file) TOKEN_FILE=$2; shift 2 ;;
+		*) echo "veilleur-report: unknown argument $1" >&2; exit 2 ;;
+	esac
+done
+[ -n "$URL" ] || { echo "veilleur-report: --url is required" >&2; exit 2; }
+[ -n "$TARGET" ] || { echo "veilleur-report: --target is required" >&2; exit 2; }
+[ -n "$ACTIVITY" ] || { echo "veilleur-report: --activity is required" >&2; exit 2; }
+[ -r "$TOKEN_FILE" ] || { echo "veilleur-report: cannot read $TOKEN_FILE" >&2; exit 2; }
+[ -n "$REASON" ] || REASON="$TARGET is in use"
+TOKEN=$(cat "$TOKEN_FILE")
+
+log() { echo "veilleur-report: $*"; }
+api() { curl -fsS --max-time 15 -H "Authorization: Bearer $TOKEN" "$@" 2>/dev/null; }
+
+# json_str <key> — pull a top-level string out of a JSON object on stdin,
+# without pulling python into a guest that may not have it.
+json_str() {
+	sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
+}
+
+CLAIM=""
+
+# adopt an existing held claim of ours before taking a second one: a
+# restarted reporter must not pile claims up on the same target.
+adopt() {
+	body=$(api "$URL/api/claims") || return 1
+	CLAIM=$(printf '%s' "$body" | tr '{' '\n' \
+		| grep '"target"[[:space:]]*:[[:space:]]*"'"$TARGET"'"' \
+		| grep '"state"[[:space:]]*:[[:space:]]*"held"' \
+		| json_str id)
+	[ -n "$CLAIM" ] && log "adopted claim $CLAIM on $TARGET"
+	return 0
+}
+
+take() {
+	body=$(api -X POST -H 'Content-Type: application/json' \
+		-d "{\"target\":\"$TARGET\",\"reason\":\"$REASON\",\"release\":\"idle\",\"idle_after\":\"$IDLE_AFTER\"}" \
+		"$URL/api/claims") || { log "could not take a claim (the watchman is unreachable)"; return 1; }
+	CLAIM=$(printf '%s' "$body" | json_str id)
+	[ -n "$CLAIM" ] || { log "no claim id in the answer"; return 1; }
+	log "claimed $TARGET as $CLAIM (idle after $IDLE_AFTER)"
+}
+
+beat() {
+	api -X POST "$URL/api/claims/$CLAIM/heartbeat" >/dev/null || {
+		log "heartbeat on $CLAIM failed — dropping it and starting over"
+		CLAIM=""
+		return 1
+	}
+}
+
+adopt || log "could not list claims at start — carrying on"
+log "reporting $TARGET to $URL every ${INTERVAL}s (activity: $ACTIVITY)"
+
+while :; do
+	if "$ACTIVITY" >/dev/null 2>&1; then
+		if [ -n "$CLAIM" ]; then beat; else take; fi
+	elif [ -n "$CLAIM" ]; then
+		# Stop talking; do NOT release. The claim ages out after its idle
+		# window, so a brief pause in play does not cost a restart — and a
+		# reporter that dies mid-session cannot slam the door either.
+		log "$TARGET is idle — letting claim $CLAIM age out"
+		CLAIM=""
+	fi
+	sleep "$INTERVAL"
+done
