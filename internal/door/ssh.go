@@ -207,10 +207,34 @@ func (s *SSH) Observe(ctx context.Context, localNodes []string) (Snapshot, error
 	return snap, nil
 }
 
-// Wake sends the magic packet from a 24/7 node onto the corosync fabric.
+// Wake sends the magic packet from EVERY control node, not the first one
+// that answers. A magic packet is a single unacknowledged broadcast frame:
+// it can simply be lost, and when it is, the node stays dark and the next
+// attempt is a whole reconcile interval away. This lab watched exactly that
+// happen — one node's packet did nothing while the other's woke the machine
+// in 60 s, on hardware that was armed and healthy either way. The night
+// shift's own alarm clock had known this since it was written ("both 24/7
+// nodes send it; a second packet is free"); this did not, until it did.
+//
+// Succeeds if any node got its packet out.
 func (s *SSH) Wake(ctx context.Context, node string) error {
-	_, err := s.anyControl(ctx, "wake "+node)
-	return err
+	controls := s.controls()
+	if len(controls) == 0 {
+		return fmt.Errorf("door: no control node declared")
+	}
+	var sent int
+	var lastErr error
+	for _, from := range controls {
+		if _, err := s.run(ctx, from, "wake "+node); err != nil {
+			lastErr = err
+			continue
+		}
+		sent++
+	}
+	if sent == 0 {
+		return fmt.Errorf("door: no control node could wake %s: %w", node, lastErr)
+	}
+	return nil
 }
 
 // StartGuest starts a guest anywhere in the cluster.

@@ -166,3 +166,17 @@ func (m *Mock) Reset() {
 	defer m.mu.Unlock()
 	m.Actions = nil
 }
+
+// WakeSenders counts how many senders were used for the last wake — the mock
+// records one action per sender, so a test can assert redundancy.
+func (m *Mock) Count(action string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, a := range m.Actions {
+		if a == action {
+			n++
+		}
+	}
+	return n
+}
