@@ -117,7 +117,7 @@ all. Stops are graceful; nothing is ever forced.
 ```sh
 podman run --rm -p 8080:8080 \
   -v ./config.yaml:/etc/veilleur/config.yaml:ro -v ./data:/data \
-  ghcr.io/tomblancdev/veilleur:0.2.2
+  ghcr.io/tomblancdev/veilleur:0.3.1
 ```
 
 `scratch` + one binary, uid 65532, read-only root. Config:
