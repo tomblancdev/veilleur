@@ -93,6 +93,10 @@ log "reporting $TARGET to $URL every ${INTERVAL}s (activity: $ACTIVITY)"
 
 while :; do
 	if "$ACTIVITY" >/dev/null 2>&1; then
+		# no claim in hand: one of ours may still be held and aging out
+		# (activity that flaps would otherwise litter the store with a new
+		# claim per flap). Adopt before taking.
+		if [ -z "$CLAIM" ]; then adopt || true; fi
 		if [ -n "$CLAIM" ]; then beat; else take; fi
 	elif [ -n "$CLAIM" ]; then
 		# Stop talking; do NOT release. The claim ages out after its idle
