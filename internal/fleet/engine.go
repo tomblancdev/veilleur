@@ -64,7 +64,12 @@ type Engine struct {
 func New(cfg *config.Config, st *store.Store, fl door.Fleet, log *slog.Logger) *Engine {
 	return &Engine{
 		cfg: cfg, st: st, fl: fl, log: log,
-		now:           time.Now,
+		now: time.Now,
+		// NOT healthy until it has actually looked once. An empty snapErr
+		// used to mean "fine", so a watchman whose door was blocked reported
+		// /healthz 200 from boot until its first failed pass — and the
+		// converge's health gate passed on a service that could see nothing.
+		snapErr:       "no observation yet",
 		unwantedSince: map[string]time.Time{},
 		lastError:     map[string]string{},
 		lastChanged:   map[string]time.Time{},

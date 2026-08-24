@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +76,9 @@ func (s *SSH) controls() []string {
 			out = append(out, node)
 		}
 	}
+	// sorted, not map order: which node we ask first must be the same on
+	// every pass, or a half-broken door makes the whole thing flap.
+	sort.Strings(out)
 	return out
 }
 

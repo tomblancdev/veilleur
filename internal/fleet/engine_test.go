@@ -346,3 +346,19 @@ func TestIdleClaimRenewsOnHeartbeat(t *testing.T) {
 		t.Fatalf("20 min idle should end the claim, got %d held", got)
 	}
 }
+
+// A watchman that has never looked is not healthy. Before this, snapErr
+// started empty, /healthz answered 200 from boot, and the converge's health
+// gate passed on a service whose door was blocked (found live 2026-08-24).
+func TestNotHealthyBeforeTheFirstObservation(t *testing.T) {
+	h := newHarness(t)
+	if ok, why := h.e.Healthy(); ok {
+		t.Fatal("health must not say ok before the first successful pass")
+	} else if why == "" {
+		t.Error("and it should say why")
+	}
+	h.tick()
+	if ok, why := h.e.Healthy(); !ok {
+		t.Fatalf("after a good pass it is healthy, got %q", why)
+	}
+}
