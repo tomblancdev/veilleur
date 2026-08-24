@@ -182,7 +182,14 @@ func (s *Server) uiRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 var funcs = template.FuncMap{
-	"dur": func(d time.Duration) string {
+	"dur": func(v any) string {
+		var d time.Duration
+		switch t := v.(type) {
+		case time.Duration:
+			d = t
+		case config.Duration:
+			d = t.D()
+		}
 		if d <= 0 {
 			return "—"
 		}

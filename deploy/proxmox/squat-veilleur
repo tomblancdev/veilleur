@@ -29,6 +29,9 @@ GUESTS=${GUESTS:-}
 WAKE=${WAKE:-}
 MAY_POWEROFF=${MAY_POWEROFF:-no}
 FABRIC_BCAST=${FABRIC_BCAST:-}
+# a converge lock older than this is stale and ignored (power.md §10)
+CONVERGE_LOCK_MAX_AGE_MIN=${CONVERGE_LOCK_MAX_AGE_MIN:-120}
+export CONVERGE_LOCK_MAX_AGE_MIN
 
 deny() { logger -t squat-veilleur "DENIED: $*"; echo "squat-veilleur: refused: $*" >&2; exit 2; }
 
@@ -54,6 +57,7 @@ status() {
 import json, subprocess, sys, time, os
 
 node = sys.argv[1]
+CONVERGE_LOCK_MAX_AGE_MIN = int(os.environ.get("CONVERGE_LOCK_MAX_AGE_MIN", "120"))
 out = {"node": node, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
        "cluster": {"online": 0, "total": 0}, "nodes": {}, "guests": [],
        "locks": {}, "ttys": 0}
@@ -71,9 +75,20 @@ try:
 except Exception:
     pass
 
-# the locks that forbid a sleep, cluster-wide (pmxcfs replicates them)
-out["locks"]["maintenance"] = os.path.exists("/etc/pve/squat-maintenance.lock")
-out["locks"]["converge"] = os.path.exists("/etc/pve/squat-converge.lock")
+# the locks that forbid a sleep, cluster-wide (pmxcfs replicates them).
+# A converge lock is ignored once stale: a run that died must cost one sleep
+# cycle, never a machine pinned awake for ever.
+def lock(path, max_age_min=None):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if max_age_min is not None and (time.time() - st.st_mtime) > max_age_min * 60:
+        return False
+    return True
+
+out["locks"]["maintenance"] = lock("/etc/pve/squat-maintenance.lock")
+out["locks"]["converge"] = lock("/etc/pve/squat-converge.lock", CONVERGE_LOCK_MAX_AGE_MIN)
 
 # interactive sessions on THIS node: a `who` line with a pts/tty. ansible
 # and ssh one-liners register without one and must not count (the same rule

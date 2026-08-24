@@ -110,7 +110,7 @@ func (e *Engine) Board() Board {
 			v.Known, v.Up = ok, ok && g.Status == "running"
 		}
 		if since, ok := e.unwantedSince[name]; ok {
-			v.UnwantedFor = now.Sub(since).Truncate(time.Second)
+			v.UnwantedFor = config.Duration(now.Sub(since).Truncate(time.Second))
 		}
 		v.Blocked = e.blocked[name]
 		v.Pending = e.pending[name]
@@ -257,7 +257,7 @@ func (e *Engine) ETA(name string) time.Duration {
 	var eta time.Duration
 	for _, v := range e.Chain(name) {
 		if !v.Up {
-			eta += v.UpTimeout
+			eta += v.UpTimeout.D()
 		}
 	}
 	return eta

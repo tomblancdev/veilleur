@@ -72,3 +72,32 @@ func TestOrderIsDependencyOrder(t *testing.T) {
 		t.Fatalf("the node must come before the guest that requires it: %v", order)
 	}
 }
+
+// The shipped example is the documentation: if it stops loading, the docs
+// are lying. It also exercises the duration form people actually type.
+func TestExampleConfigLoads(t *testing.T) {
+	c, err := Load("../../targets.example.yaml")
+	if err != nil {
+		t.Fatalf("targets.example.yaml must be valid: %v", err)
+	}
+	m, ok := c.Targets["muscle1"]
+	if !ok {
+		t.Fatal("the example should declare the on-demand node")
+	}
+	if m.DownGrace.D().Minutes() != 10 {
+		t.Errorf("down_grace 10m should parse, got %s", m.DownGrace.D())
+	}
+	if c.Targets["console"].IdleAfter.D().Minutes() != 20 {
+		t.Errorf("idle_after 20m should parse, got %s", c.Targets["console"].IdleAfter.D())
+	}
+	if c.ReconcileInterval.D().Seconds() != 30 {
+		t.Errorf("reconcile_interval 30s should parse, got %s", c.ReconcileInterval.D())
+	}
+	// defaults filled in where the file says nothing
+	if c.Targets["pbs"].MaxHold.D().Hours() != 6 {
+		t.Errorf("pbs caps holds at 6h, got %s", c.Targets["pbs"].MaxHold.D())
+	}
+	if c.Targets["console"].MaxHold.D() != c.DefaultHold.D() {
+		t.Errorf("a target with no max_hold should inherit default_hold, got %s", c.Targets["console"].MaxHold.D())
+	}
+}

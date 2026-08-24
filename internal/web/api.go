@@ -45,7 +45,7 @@ func (s *Server) newClaim(id auth.Identity, req claimRequest) (store.Claim, erro
 		return store.Claim{}, fmt.Errorf("no such target: %q", req.Target)
 	}
 	now := time.Now()
-	hold := t.MaxHold
+	hold := t.MaxHold.D()
 	if req.Hold != "" {
 		d, err := time.ParseDuration(req.Hold)
 		if err != nil {
@@ -54,9 +54,9 @@ func (s *Server) newClaim(id auth.Identity, req claimRequest) (store.Claim, erro
 		if d <= 0 {
 			return store.Claim{}, fmt.Errorf("hold must be positive")
 		}
-		if d > t.MaxHold {
+		if d > t.MaxHold.D() {
 			// policy, not preference: a target says how long it may be pinned
-			d = t.MaxHold
+			d = t.MaxHold.D()
 		}
 		hold = d
 	}
@@ -69,7 +69,7 @@ func (s *Server) newClaim(id auth.Identity, req claimRequest) (store.Claim, erro
 	default:
 		return store.Claim{}, fmt.Errorf("release must be explicit, idle or deadline")
 	}
-	idleAfter := t.IdleAfter
+	idleAfter := t.IdleAfter.D()
 	if req.IdleAfter != "" {
 		d, err := time.ParseDuration(req.IdleAfter)
 		if err != nil {

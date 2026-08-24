@@ -113,6 +113,17 @@ func Open(dir string) (*Store, error) {
 		events: filepath.Join(dir, "events.jsonl"),
 		keep:   7 * 24 * time.Hour,
 	}
+	// Prove the directory is writable NOW, not at the first claim. A store
+	// that cannot be written is a watchman that will accept a claim and then
+	// lose it — and /healthz would have said "ok" the whole time. Found by
+	// the first smoke test of the published image (a data dir owned by the
+	// wrong uid), which is exactly how it would have failed in the lab.
+	probe := filepath.Join(dir, ".writable")
+	if err := os.WriteFile(probe, []byte("veilleur"), 0o600); err != nil {
+		return nil, fmt.Errorf("store: %s is not writable by this user (uid %d): %w", dir, os.Getuid(), err)
+	}
+	_ = os.Remove(probe)
+
 	raw, err := os.ReadFile(s.path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):

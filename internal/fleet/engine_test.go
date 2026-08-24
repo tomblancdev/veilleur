@@ -20,24 +20,24 @@ import (
 //	pbs     1002 ─┘
 func labConfig() *config.Config {
 	c := &config.Config{
-		ReconcileInterval: time.Second,
-		DefaultHold:       8 * time.Hour,
+		ReconcileInterval: config.Duration(time.Second),
+		DefaultHold:       config.Duration(8 * time.Hour),
 		DoorCfg:           config.Door{Mode: "mock"},
 		Targets: map[string]config.Target{
 			"muscle1": {
 				Name: "muscle1", Kind: config.KindNode, Node: "muscle1",
 				OnDemand: true, WOL: true,
-				UpTimeout: 2 * time.Minute, DownGrace: 10 * time.Minute,
+				UpTimeout: config.Duration(2 * time.Minute), DownGrace: config.Duration(10 * time.Minute),
 				Guards: []string{"human_session", "maintenance_lock", "converge_lock", "cluster_whole"},
 			},
 			"pbs": {
 				Name: "pbs", Kind: config.KindGuest, VMID: 1002, Node: "muscle1",
-				Requires: []string{"muscle1"}, DownGrace: time.Minute,
+				Requires: []string{"muscle1"}, DownGrace: config.Duration(time.Minute),
 			},
 			"console": {
 				Name: "console", Kind: config.KindGuest, VMID: 5001, Node: "muscle1",
-				Requires: []string{"muscle1"}, DownGrace: 2 * time.Minute,
-				IdleAfter: 20 * time.Minute,
+				Requires: []string{"muscle1"}, DownGrace: config.Duration(2 * time.Minute),
+				IdleAfter: config.Duration(20 * time.Minute),
 			},
 		},
 	}

@@ -20,12 +20,12 @@ import (
 func testServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
 	cfg := &config.Config{
-		House: "Le Squat", ReconcileInterval: time.Minute, DefaultHold: 8 * time.Hour,
+		House: "Le Squat", ReconcileInterval: config.Duration(time.Minute), DefaultHold: config.Duration(8 * time.Hour),
 		DoorCfg: config.Door{Mode: "mock"},
 		Auth:    config.Auth{UserHeader: "Remote-User", GroupsHeader: "Remote-Groups", AdminGroups: []string{"admins"}, TrustedProxies: []string{"10.0.0.10"}},
 		Targets: map[string]config.Target{
-			"muscle1": {Name: "muscle1", Kind: config.KindNode, Node: "muscle1", OnDemand: true, WOL: true, UpTimeout: time.Minute, DownGrace: time.Minute, MaxHold: 8 * time.Hour},
-			"console": {Name: "console", Kind: config.KindGuest, VMID: 5001, Node: "muscle1", Requires: []string{"muscle1"}, UpTimeout: time.Minute, DownGrace: time.Minute, MaxHold: 4 * time.Hour, IdleAfter: 20 * time.Minute},
+			"muscle1": {Name: "muscle1", Kind: config.KindNode, Node: "muscle1", OnDemand: true, WOL: true, UpTimeout: config.Duration(time.Minute), DownGrace: config.Duration(time.Minute), MaxHold: config.Duration(8 * time.Hour)},
+			"console": {Name: "console", Kind: config.KindGuest, VMID: 5001, Node: "muscle1", Requires: []string{"muscle1"}, UpTimeout: config.Duration(time.Minute), DownGrace: config.Duration(time.Minute), MaxHold: config.Duration(4 * time.Hour), IdleAfter: config.Duration(20 * time.Minute)},
 		},
 	}
 	if err := cfg.Validate(); err != nil {

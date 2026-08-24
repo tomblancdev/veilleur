@@ -41,17 +41,17 @@ type Target struct {
 	OnDemand bool `yaml:"on_demand" json:"on_demand,omitempty"`
 	WOL      bool `yaml:"wol" json:"wol,omitempty"`
 
-	UpTimeout time.Duration `yaml:"up_timeout" json:"up_timeout"`
-	DownGrace time.Duration `yaml:"down_grace" json:"down_grace"`
+	UpTimeout Duration `yaml:"up_timeout" json:"up_timeout"`
+	DownGrace Duration `yaml:"down_grace" json:"down_grace"`
 
 	// guards that may veto a STOP of this target (never a start).
 	Guards []string `yaml:"guards" json:"guards,omitempty"`
 
 	// default idle window for a claim that releases on idleness.
-	IdleAfter time.Duration `yaml:"idle_after" json:"idle_after,omitempty"`
+	IdleAfter Duration `yaml:"idle_after" json:"idle_after,omitempty"`
 
 	// the longest a claim on this target may run before it must be renewed.
-	MaxHold time.Duration `yaml:"max_hold" json:"max_hold"`
+	MaxHold Duration `yaml:"max_hold" json:"max_hold"`
 
 	// false = observe and report, never act. The safety catch for a target
 	// you want on the board before you trust the machinery with it.
@@ -88,7 +88,7 @@ type Door struct {
 	Mode    string        `yaml:"mode"` // ssh | mock
 	User    string        `yaml:"user"`
 	KeyFile string        `yaml:"key_file"`
-	Timeout time.Duration `yaml:"timeout"`
+	Timeout Duration `yaml:"timeout"`
 	Hosts   []DoorHost    `yaml:"hosts"`
 }
 
@@ -102,9 +102,9 @@ type Config struct {
 
 	// how often the engine compares the world to the claims. Every mutation
 	// also kicks a reconcile at once — this is the floor, not the pulse.
-	ReconcileInterval time.Duration `yaml:"reconcile_interval"`
+	ReconcileInterval Duration `yaml:"reconcile_interval"`
 	// the cap every claim's deadline is clamped to when it names none.
-	DefaultHold time.Duration `yaml:"default_hold"`
+	DefaultHold Duration `yaml:"default_hold"`
 
 	Auth    Auth              `yaml:"auth"`
 	DoorCfg Door              `yaml:"door"`
@@ -118,14 +118,14 @@ func Load(path string) (*Config, error) {
 		DataDir:           "/data",
 		TZ:                "Europe/Paris",
 		House:             "Le Squat",
-		ReconcileInterval: 30 * time.Second,
-		DefaultHold:       8 * time.Hour,
+		ReconcileInterval: Duration(30 * time.Second),
+		DefaultHold:       Duration(8 * time.Hour),
 		Auth: Auth{
 			UserHeader:   "Remote-User",
 			GroupsHeader: "Remote-Groups",
 			AdminGroups:  []string{"admins"},
 		},
-		DoorCfg: Door{Mode: "ssh", User: "veilleur", Timeout: 30 * time.Second},
+		DoorCfg: Door{Mode: "ssh", User: "veilleur", Timeout: Duration(30 * time.Second)},
 	}
 	if path != "" {
 		raw, err := os.ReadFile(path)
@@ -148,10 +148,10 @@ func Load(path string) (*Config, error) {
 	for name, t := range c.Targets {
 		t.Name = name
 		if t.UpTimeout == 0 {
-			t.UpTimeout = 3 * time.Minute
+			t.UpTimeout = Duration(3 * time.Minute)
 		}
 		if t.DownGrace == 0 {
-			t.DownGrace = time.Minute
+			t.DownGrace = Duration(time.Minute)
 		}
 		if t.MaxHold == 0 {
 			t.MaxHold = c.DefaultHold

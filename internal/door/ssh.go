@@ -38,7 +38,7 @@ func NewSSH(cfg config.Door) (*SSH, error) {
 	if err != nil {
 		return nil, fmt.Errorf("door key: %w", err)
 	}
-	timeout := cfg.Timeout
+	timeout := cfg.Timeout.D()
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}

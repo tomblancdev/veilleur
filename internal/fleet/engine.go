@@ -25,7 +25,7 @@ type TargetView struct {
 	Known         bool          `json:"known"`
 	Wanted        bool          `json:"wanted"`
 	WantedBy      []string      `json:"wanted_by,omitempty"` // claim ids holding it, directly or through a dependent
-	UnwantedFor   time.Duration `json:"unwanted_for,omitempty"`
+	UnwantedFor   config.Duration `json:"unwanted_for,omitempty"`
 	Blocked       string        `json:"blocked,omitempty"` // the guard refusing to stop it
 	Pending       string        `json:"pending,omitempty"` // an action in flight
 	LastError     string        `json:"last_error,omitempty"`
@@ -94,7 +94,7 @@ func (e *Engine) Kick() {
 
 // Run reconciles on a ticker and whenever kicked, until ctx is done.
 func (e *Engine) Run(ctx context.Context) {
-	t := time.NewTicker(e.cfg.ReconcileInterval)
+	t := time.NewTicker(e.cfg.ReconcileInterval.D())
 	defer t.Stop()
 	e.Reconcile(ctx)
 	for {
@@ -262,7 +262,7 @@ func (e *Engine) considerDown(ctx context.Context, t config.Target, snap door.Sn
 		}
 	}
 	since := e.markUnwanted(t.Name, now)
-	if now.Sub(since) < t.DownGrace {
+	if now.Sub(since) < t.DownGrace.D() {
 		e.setBlocked(t.Name, "grace")
 		return
 	}
