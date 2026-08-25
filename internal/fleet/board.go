@@ -151,6 +151,27 @@ func (e *Engine) Metrics() string {
 		}
 		add("veilleur_target_managed{target=%q} %d\n", n, m)
 	}
+	// The one an alert needs: a target that is up, is ours to stop, and whose
+	// every condition already agrees it MAY stop. If that persists, the
+	// watchman is not doing its job — which is the failure this whole product
+	// exists to prevent, so it must be visible from outside.
+	add("# HELP veilleur_target_stoppable Managed, up, and every stop_when condition agrees it may stop.\n# TYPE veilleur_target_stoppable gauge\n")
+	for _, n := range e.cfg.TargetNames() {
+		v := 0
+		if _, agreed := e.okSince[n]; agreed && e.up[n] && e.cfg.Managed(n) {
+			v = 1
+		}
+		add("veilleur_target_stoppable{target=%q} %d\n", n, v)
+	}
+	add("# HELP veilleur_target_quiet_seconds How long every stop_when condition has agreed.\n# TYPE veilleur_target_quiet_seconds gauge\n")
+	for _, n := range e.cfg.TargetNames() {
+		q := 0.0
+		if since, ok := e.okSince[n]; ok {
+			q = now.Sub(since).Seconds()
+		}
+		add("veilleur_target_quiet_seconds{target=%q} %.0f\n", n, q)
+	}
+
 	add("# HELP veilleur_signal Last answer of a signal: 1 true, 0 false, -1 unknown.\n# TYPE veilleur_signal gauge\n")
 	names := make([]string, 0, len(e.vals))
 	for k := range e.vals {
