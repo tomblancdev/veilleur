@@ -91,7 +91,15 @@ type boardData struct {
 	Identity auth.Identity
 	Board    fleet.Board
 	Targets  []string
+	Signals  []signalRow
 	Now      time.Time
+}
+
+// signalRow is every DECLARED signal, asked or not — a board that only shows
+// what happened to be asked hides what the watchman knows.
+type signalRow struct {
+	Name, Means, Err   string
+	Asked, Known, True bool
 }
 
 func (s *Server) board(w http.ResponseWriter, r *http.Request) {
@@ -101,8 +109,17 @@ func (s *Server) board(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	b := s.engine.Board()
+	rows := make([]signalRow, 0, len(s.cfg.Signals))
+	for _, n := range s.cfg.SignalNames() {
+		r := signalRow{Name: n, Means: s.cfg.Signals[n].Means}
+		if v, ok := b.Signals[n]; ok {
+			r.Asked, r.Known, r.True, r.Err = true, v.Known, v.True, v.Err
+		}
+		rows = append(rows, r)
+	}
 	data := boardData{House: s.cfg.House, Version: s.version, Identity: id,
-		Board: s.engine.Board(), Targets: s.cfg.TargetNames(), Now: time.Now()}
+		Board: b, Targets: s.cfg.TargetNames(), Signals: rows, Now: time.Now()}
 	if err := s.page.Execute(w, data); err != nil {
 		s.log.Error("render", "err", err)
 	}
@@ -263,9 +280,9 @@ code{color:var(--acc)}
 
 <h2>Signals</h2>
 <table><tr><th>signal</th><th>answer</th><th>means</th></tr>
-{{range $n, $v := .Board.Signals}}<tr><td class="name">{{$n}}</td>
-<td>{{if $v.Known}}{{if $v.True}}<span class="acc">yes</span>{{else}}<span class="dim">no</span>{{end}}{{else}}<span class="warn">unknown</span>{{end}}</td>
-<td class="why">{{if $v.Err}}<span class="err">{{$v.Err}}</span>{{end}}</td></tr>{{end}}
+{{range .Signals}}<tr><td class="name">{{.Name}}</td>
+<td>{{if .Asked}}{{if .Known}}{{if .True}}<span class="acc">yes</span>{{else}}<span class="dim">no</span>{{end}}{{else}}<span class="warn">unknown</span>{{end}}{{else}}<span class="dim">not asked yet</span>{{end}}</td>
+<td class="why">{{.Means}}{{if .Err}}<br><span class="err">{{.Err}}</span>{{end}}</td></tr>{{end}}
 </table>
 <p class="why">A signal that cannot be answered blocks a stop; it never permits one.
 Only a target Le Veilleur <em>manages</em> is ever stopped — anything else simply keeps its machine up.</p>

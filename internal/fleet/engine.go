@@ -204,6 +204,17 @@ func (e *Engine) Pass(ctx context.Context) {
 		e.log.Error("no target could be observed — doing nothing this pass")
 		return
 	}
+
+	// Ask every declared signal, not only the ones a stop decision happens to
+	// need. Lazily-asked signals left the board and /metrics blank whenever
+	// nothing was close to being stopped — so you could not see what the
+	// watchman knew, which is most of the value of having a board at all.
+	// Each answer is still cached for its ttl, so this costs one round per
+	// signal per ttl window, not one per pass.
+	for _, name := range e.cfg.SignalNames() {
+		e.evalSignal(ctx, name)
+	}
+
 	e.stopPass(ctx)
 }
 
