@@ -132,6 +132,11 @@ func (e *Engine) evalSignal(ctx context.Context, name string) Value {
 	if had && prev.Fresh(now, sig.TTL.D()) {
 		return prev
 	}
+	if e.nodeIsDown(sig.RunOn) {
+		v := Value{Known: false, At: now, Err: sig.RunOn + " is asleep"}
+		e.setVal(name, v)
+		return v
+	}
 	ans, err := e.dr.Signal(ctx, sig.RunOn, name)
 	v := Value{At: now}
 	if err != nil {
@@ -161,6 +166,15 @@ func (e *Engine) probe(ctx context.Context, name string) (up bool, known bool) {
 	if t.Kind == config.KindNode {
 		node = config.AnyControl // a sleeping node cannot answer for itself
 	}
+	if e.nodeIsDown(node) {
+		e.mu.Lock()
+		e.upKnown[name] = false
+		e.up[name] = false
+		delete(e.upSince, name)
+		delete(e.okSince, name)
+		e.mu.Unlock()
+		return false, false
+	}
 	ans, err := e.dr.Act(ctx, node, "state", name)
 	now := e.now()
 	e.mu.Lock()
@@ -184,10 +198,43 @@ func (e *Engine) probe(ctx context.Context, name string) (up bool, known bool) {
 	return ans.True(), true
 }
 
+// down reports whether `node` is a declared node target we have just
+// observed as down. Dialling a machine we know is asleep costs a full ssh
+// timeout per question and answers nothing: with six things to ask about a
+// sleeping tower, a pass took minutes instead of seconds and /healthz stayed
+// 503 long after start. A node that is down makes its questions UNKNOWN
+// immediately — which is the same answer, and blocks a stop either way.
+func (e *Engine) nodeIsDown(node string) bool {
+	if node == "" || node == config.AnyControl {
+		return false
+	}
+	for _, n := range e.cfg.TargetNames() {
+		t := e.cfg.Targets[n]
+		if t.Kind == config.KindNode && t.Node == node {
+			e.mu.RLock()
+			defer e.mu.RUnlock()
+			return e.upKnown[n] && !e.up[n]
+		}
+	}
+	return false
+}
+
 // Pass is one reconcile: observe, then consider stopping.
 func (e *Engine) Pass(ctx context.Context) {
 	anyKnown := false
+	// nodes first, so everything after knows which machines are awake
 	for _, name := range e.cfg.TargetNames() {
+		if e.cfg.Targets[name].Kind != config.KindNode {
+			continue
+		}
+		if _, known := e.probe(ctx, name); known {
+			anyKnown = true
+		}
+	}
+	for _, name := range e.cfg.TargetNames() {
+		if e.cfg.Targets[name].Kind == config.KindNode {
+			continue
+		}
 		if _, known := e.probe(ctx, name); known {
 			anyKnown = true
 		}

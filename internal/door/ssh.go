@@ -86,7 +86,15 @@ func (s *SSH) run(ctx context.Context, node, args string) (Answer, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	d := net.Dialer{Timeout: s.timeout}
+	// A machine that is off does not refuse a connection, it says nothing —
+	// so a dial to it burns the whole command timeout. Reaching a live node
+	// takes milliseconds on a LAN; give the dial its own short budget and
+	// leave the long one for the command actually running.
+	dialTimeout := s.timeout / 6
+	if dialTimeout < 5*time.Second {
+		dialTimeout = 5 * time.Second
+	}
+	d := net.Dialer{Timeout: dialTimeout}
 	conn, err := d.DialContext(ctx, "tcp", h.Addr)
 	if err != nil {
 		return Answer{}, &ErrUnreachable{Node: node, Err: err}

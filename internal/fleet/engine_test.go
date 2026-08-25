@@ -337,3 +337,33 @@ func TestWakeAndStopDoNotRaceOnTheSameTarget(t *testing.T) {
 		t.Fatal("after a wake the console must be up")
 	}
 }
+
+// A sleeping node must not be dialled for every question about it. Before
+// this, six probes and signals aimed at a sleeping tower each burned the
+// full ssh timeout, so a pass took minutes and /healthz stayed 503 long
+// after start — which failed the converge's own health gate.
+func TestASleepingNodeIsNotDialledForEveryQuestion(t *testing.T) {
+	h := newHarness(t)
+	// the tower is down; everything on it is therefore unanswerable
+	h.m.State["muscle1"] = 1
+	h.m.Unreachable["muscle1"] = true
+	h.pass()
+
+	b := h.e.Board()
+	for _, v := range b.Targets {
+		if v.Name == "muscle1" && !v.Known {
+			t.Error("the node itself is answered by a CONTROL node and must stay known")
+		}
+		if v.Name == "console" && v.Known {
+			t.Error("a guest on a sleeping node cannot be known")
+		}
+	}
+	// and the engine must still consider itself sighted: it saw the node
+	if ok, why := h.e.Healthy(); !ok {
+		t.Fatalf("observing the node is observing the fleet: %q", why)
+	}
+	// the signals that live on the sleeping node are UNKNOWN, and say why
+	if v, ok := b.Signals["console_in_use"]; ok && v.Known {
+		t.Error("a signal answered by a sleeping node cannot be known")
+	}
+}
