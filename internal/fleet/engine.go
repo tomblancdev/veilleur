@@ -58,6 +58,14 @@ type Engine struct {
 	seenSig  map[string]bool // signal -> has ever answered (min_uptime rule)
 	firstErr string
 
+	// One process, one key — but the reconcile loop and an API-triggered
+	// wake run concurrently inside it. Without this, a stop decided a moment
+	// ago can land on a target a wake is busy raising, and the machine goes
+	// up and straight back down. One lock per target, held across the whole
+	// action.
+	acting map[string]*sync.Mutex
+	actMu  sync.Mutex
+
 	kick chan struct{}
 }
 
@@ -69,6 +77,7 @@ func New(cfg *config.Config, st *state.Store, dr door.Door, log *slog.Logger) *E
 		upSince: map[string]time.Time{}, okSince: map[string]time.Time{},
 		blocked: map[string]string{}, pending: map[string]string{},
 		lastErr: map[string]string{}, acts: map[string]int{}, seenSig: map[string]bool{},
+		acting: map[string]*sync.Mutex{},
 		firstErr: "no observation yet",
 		kick:     make(chan struct{}, 1),
 	}
@@ -299,6 +308,24 @@ func (e *Engine) considerDown(ctx context.Context, name string) {
 	}
 
 	e.setBlocked(name, "")
+
+	// take the target's action lock, then look again: a wake may have been
+	// raising it while we were deciding, and a decision taken before that
+	// wake must not land after it.
+	lock := e.lockFor(name)
+	lock.Lock()
+	defer lock.Unlock()
+	if up, known := e.probe(ctx, name); !known || !up {
+		return // it went away by itself
+	}
+	e.mu.RLock()
+	freshUpSince := e.upSince[name]
+	e.mu.RUnlock()
+	if !freshUpSince.IsZero() && e.now().Sub(freshUpSince) < t.MinUptime.D() {
+		e.setBlocked(name, "min_uptime") // it was raised while we deliberated
+		return
+	}
+
 	e.setPending(name, "stopping")
 	e.log.Info("stopping", "target", name, "kind", t.Kind,
 		"quiet_for", now.Sub(since).Truncate(time.Second).String(),
@@ -343,14 +370,25 @@ func (e *Engine) Wake(ctx context.Context, name, why string) error {
 		if t.Kind == config.KindNode {
 			node = config.AnyControl
 		}
+		lock := e.lockFor(step)
+		lock.Lock()
+		// look again under the lock: another wake may have raised it while
+		// we queued behind a stop
+		if up, known := e.probe(ctx, step); known && up {
+			lock.Unlock()
+			continue
+		}
 		e.setPending(step, "raising")
 		e.log.Info("raising", "target", step, "kind", t.Kind, "why", why)
 		_, err := e.dr.Act(ctx, node, "up", step)
 		e.finish(step, "up", err)
 		if err != nil {
+			lock.Unlock()
 			return fmt.Errorf("raising %s: %w", step, err)
 		}
-		if err := e.await(ctx, step, t.UpTimeout.D()); err != nil {
+		err = e.await(ctx, step, t.UpTimeout.D())
+		lock.Unlock()
+		if err != nil {
 			return err
 		}
 	}
@@ -376,6 +414,18 @@ func (e *Engine) await(ctx context.Context, name string, timeout time.Duration) 
 		case <-time.After(5 * time.Second):
 		}
 	}
+}
+
+// lockFor returns the per-target action lock, creating it on first use.
+func (e *Engine) lockFor(name string) *sync.Mutex {
+	e.actMu.Lock()
+	defer e.actMu.Unlock()
+	l, ok := e.acting[name]
+	if !ok {
+		l = &sync.Mutex{}
+		e.acting[name] = l
+	}
+	return l
 }
 
 func holdTarget(sig string) (string, bool) {

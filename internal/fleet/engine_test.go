@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -304,5 +305,35 @@ func TestWakeRaisesOnlyWhatIsMissing(t *testing.T) {
 	}
 	if !h.m.Took("up pbs") {
 		t.Fatal("pbs should have been raised")
+	}
+}
+
+// One process, one key — but its reconcile loop and an API wake run
+// concurrently inside it. A stop decided a moment ago must not land on a
+// target a wake is busy raising, or the machine goes up and straight back
+// down. Run with -race.
+func TestWakeAndStopDoNotRaceOnTheSameTarget(t *testing.T) {
+	h := newHarness(t)
+	h.wake(t, "console")
+	h.advance(30 * time.Minute) // well past min_uptime; it is stoppable
+	h.pass()                    // let the grace clock start
+	h.advance(30 * time.Minute)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); h.pass() }()
+	go func() {
+		defer wg.Done()
+		_ = h.e.Wake(context.Background(), "console", "somebody wants it back")
+	}()
+	wg.Wait()
+
+	// whatever the interleaving, the world must be self-consistent: if the
+	// wake won, it is up; if the stop won, a later wake still brings it back.
+	if err := h.e.Wake(context.Background(), "console", "settle"); err != nil {
+		t.Fatalf("the console must still be raisable after the race: %v", err)
+	}
+	if h.m.State["console"] != 0 {
+		t.Fatal("after a wake the console must be up")
 	}
 }
