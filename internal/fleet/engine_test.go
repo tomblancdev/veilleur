@@ -1,9 +1,11 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -374,6 +376,31 @@ func TestASleepingNodeIsNotDialledForEveryQuestion(t *testing.T) {
 // was still inside its ttl — perfectly fresh by the observing rules — so the
 // node powered itself off SIX SECONDS after the guest came up, with the guest
 // on it. Observing may use a cached answer; powering a machine off may not.
+// THE LINE THAT DIED WITH THE MACHINE. muscle1's own `down` command arms the
+// RTC wake backstop and prints the time it armed it — the one thing that says
+// a sleeping tower will wake itself for the backups. That line reached nothing:
+// the arm runs last at shutdown, deliberately, which is long after the log
+// shipper has been stopped, so the only copy died with the machine it was
+// about (power.md §11.0f, drilled 2026-08-25). Whatever a node says on its way
+// down has to be recorded by the process that stays alive.
+func TestTheLastWordOfAStopIsWrittenByTheWatchman(t *testing.T) {
+	h := newHarness(t)
+	var buf bytes.Buffer
+	h.e.log = slog.New(slog.NewTextHandler(&buf, nil))
+	const armed = "wake_backstop 2026-08-26 03:00:00 CEST"
+	h.m.Says["down muscle1"] = armed
+
+	h.wake(t, "muscle1")
+	h.settle(30, 30*time.Second)
+
+	if !h.m.Took("down muscle1") {
+		t.Fatal("precondition: the node never slept, so it never said anything")
+	}
+	if !strings.Contains(buf.String(), armed) {
+		t.Fatalf("the node's last word never reached the audit: %q not in the log\n%s", armed, buf.String())
+	}
+}
+
 func TestAGuestStartingInsideTheTtlStopsThePoweroff(t *testing.T) {
 	h := newHarness(t)
 	// life's ttl, not the test default: 60s, with the engine waking every 30s.

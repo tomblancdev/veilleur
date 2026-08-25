@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -431,7 +432,8 @@ func (e *Engine) considerDown(ctx context.Context, name string) {
 	if t.Kind == config.KindNode {
 		node = t.Name // a node powers itself off; its own door refuses if it may not
 	}
-	_, err := e.dr.Act(ctx, node, "down", name)
+	ans, err := e.dr.Act(ctx, node, "down", name)
+	e.said(name, "down", ans)
 	e.finish(name, "stop", err)
 	if err == nil {
 		e.mu.Lock()
@@ -443,6 +445,23 @@ func (e *Engine) considerDown(ctx context.Context, name string) {
 			e.considerDown(ctx, next)
 		}
 	}
+}
+
+// said records whatever a node's own up/down command printed.
+//
+// The command runs ON the machine being acted upon, and for a stop that
+// machine is seconds from losing power — so its own journal is the one place
+// the line cannot be trusted to survive. muscle1's `down` arms the RTC wake
+// backstop and prints the time it armed it; that line reached nothing until
+// this existed, because the arm runs last at shutdown, after the log shipper
+// has already been stopped (power.md §11.0f). The last word of a stop is
+// written HERE, by the process that stays alive.
+func (e *Engine) said(name, verb string, ans door.Answer) {
+	out := strings.TrimSpace(ans.Stdout)
+	if out == "" {
+		return
+	}
+	e.log.Info("node said", "target", name, "verb", verb, "said", out)
 }
 
 // --- the wake path --------------------------------------------------------
@@ -477,7 +496,8 @@ func (e *Engine) Wake(ctx context.Context, name, why string) error {
 		}
 		e.setPending(step, "raising")
 		e.log.Info("raising", "target", step, "kind", t.Kind, "why", why)
-		_, err := e.dr.Act(ctx, node, "up", step)
+		ans, err := e.dr.Act(ctx, node, "up", step)
+		e.said(step, "up", ans)
 		e.finish(step, "up", err)
 		if err != nil {
 			lock.Unlock()

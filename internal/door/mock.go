@@ -22,6 +22,10 @@ type Mock struct {
 	// OnUp/OnDown let a test model the world changing.
 	OnUp, OnDown func(target string)
 	Known        []string
+	// Says: "<verb> <target>" -> what that command prints on stdout. A real
+	// node's up/down command may report something the watchman must record
+	// (muscle1's `down` prints the wake backstop it just armed).
+	Says map[string]string
 }
 
 // NewMock builds an empty fleet.
@@ -29,6 +33,7 @@ func NewMock(nodes ...string) *Mock {
 	return &Mock{
 		Signals: map[string]int{}, State: map[string]int{},
 		Unreachable: map[string]bool{}, Known: nodes,
+		Says: map[string]string{},
 	}
 }
 
@@ -79,6 +84,7 @@ func (m *Mock) Act(_ context.Context, node, verb, target string) (Answer, error)
 	case "up", "down":
 		m.Actions = append(m.Actions, verb+" "+target)
 		up, down := m.OnUp, m.OnDown
+		said := m.Says[verb+" "+target]
 		m.mu.Unlock()
 		if verb == "up" && up != nil {
 			up(target)
@@ -86,7 +92,7 @@ func (m *Mock) Act(_ context.Context, node, verb, target string) (Answer, error)
 		if verb == "down" && down != nil {
 			down(target)
 		}
-		return Answer{Node: node}, nil
+		return Answer{Node: node, Stdout: said}, nil
 	}
 	m.mu.Unlock()
 	return Answer{}, fmt.Errorf("mock: bad verb %q", verb)
