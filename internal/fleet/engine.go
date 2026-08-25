@@ -116,6 +116,19 @@ func (e *Engine) Run(ctx context.Context) {
 // evalSignal returns the current value of a signal, refreshing it if stale.
 // A hold: signal is answered from the store, not from a node.
 func (e *Engine) evalSignal(ctx context.Context, name string) Value {
+	return e.evalSignalAt(ctx, name, false)
+}
+
+// evalSignalFresh asks the node again even if the cached answer is still
+// inside its ttl. The stop path uses it at the moment it fires: an answer
+// that is merely *fresh enough* to observe with is not good enough to power
+// a machine off with. muscle1 was once powered off six seconds after a guest
+// started, on a reading that was 60s old and still "fresh" (power.md §11.0e).
+func (e *Engine) evalSignalFresh(ctx context.Context, name string) Value {
+	return e.evalSignalAt(ctx, name, true)
+}
+
+func (e *Engine) evalSignalAt(ctx context.Context, name string, force bool) Value {
 	now := e.now()
 	if target, ok := holdTarget(name); ok {
 		v := Value{Known: true, True: len(e.st.On(target)) > 0, At: now}
@@ -129,7 +142,7 @@ func (e *Engine) evalSignal(ctx context.Context, name string) Value {
 	e.mu.RLock()
 	prev, had := e.vals[name]
 	e.mu.RUnlock()
-	if had && prev.Fresh(now, sig.TTL.D()) {
+	if !force && had && prev.Fresh(now, sig.TTL.D()) {
 		return prev
 	}
 	if e.nodeIsDown(sig.RunOn) {
@@ -382,6 +395,32 @@ func (e *Engine) considerDown(ctx context.Context, name string) {
 	if !freshUpSince.IsZero() && e.now().Sub(freshUpSince) < t.MinUptime.D() {
 		e.setBlocked(name, "min_uptime") // it was raised while we deliberated
 		return
+	}
+
+	// And ask every condition ONE more time, fresh. Everything above was
+	// decided from answers up to their ttl old; a stop is the one act we
+	// cannot take back, so the last word must be the current one. This is how
+	// muscle1 came to be powered off six seconds after a guest started: the
+	// grace had run on a "no guests" answer that was already stale when the
+	// decision fired (power.md §11.0e). Costs one round of signals per actual
+	// stop, and stops are rare.
+	for _, ref := range d.StopWhen {
+		sig, negated := config.SignalRef(ref)
+		v := e.evalSignalFresh(ctx, sig)
+		if !v.Known {
+			e.setBlocked(name, "unknown:"+sig)
+			e.clearOK(name)
+			return
+		}
+		want := v.True
+		if negated {
+			want = !want
+		}
+		if !want {
+			e.setBlocked(name, "held-by:"+ref)
+			e.clearOK(name)
+			return
+		}
 	}
 
 	e.setPending(name, "stopping")

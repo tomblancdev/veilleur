@@ -70,6 +70,13 @@ muscle1:
   stopped one minute after being woken for the night's backup.
 - **Backstops may wake. Backstops may not stop.** A stop-backstop races the
   thing it is backing up; a wake-backstop can only cost idle minutes.
+- **Observing may use a cached answer. Stopping may not.** Every signal is
+  cached for its `ttl`, which is right for drawing the board and for letting a
+  grace run — but the moment a stop actually fires, every condition is asked
+  again, fresh, with the target's lock held. A node was once powered off six
+  seconds after a guest started on it, from an answer that was 60s old and
+  perfectly "fresh" by the observing rules. A stop is the one act that cannot
+  be taken back, so its last word has to be the current one.
 
 ## Holding something up
 
@@ -86,6 +93,15 @@ vmid — so "is anybody using this?" is a question the node can answer with no
 agent, no credential and no door opened into the guest. Where that is not
 enough, `qm guest exec` runs a command in the guest over virtio, which is
 still a command on a hypervisor.
+
+**But conntrack only answers the question you asked.** A signal written
+against ESTABLISHED *tcp* cannot see a *udp* session, and for a game stream
+the tcp ports are handshake only — they are all closed by the time anyone is
+actually playing. The first version of `console_in_use` did exactly this and
+shut a games console down under its player, three times in one evening, while
+the only ESTABLISHED tcp connection on the box belonged to the status panel
+polling it. Write the signal against the traffic that flows *during* use, and
+prove it against a real session before trusting it.
 
 ## How it touches machines
 

@@ -367,3 +367,50 @@ func TestASleepingNodeIsNotDialledForEveryQuestion(t *testing.T) {
 		t.Error("a signal answered by a sleeping node cannot be known")
 	}
 }
+
+// THE CASE THAT COST A NODE (power.md §11.0e). muscle1 sat empty long enough
+// for its 10 minute grace to run, and in the last moments before it fired, a
+// guest started. The decision had been taken from a "no guests" answer that
+// was still inside its ttl — perfectly fresh by the observing rules — so the
+// node powered itself off SIX SECONDS after the guest came up, with the guest
+// on it. Observing may use a cached answer; powering a machine off may not.
+func TestAGuestStartingInsideTheTtlStopsThePoweroff(t *testing.T) {
+	h := newHarness(t)
+	// life's ttl, not the test default: 60s, with the engine waking every 30s.
+	// That gap is the bug's whole habitat.
+	sig := h.e.cfg.Signals["any_guest_running"]
+	sig.TTL = config.Duration(60 * time.Second)
+	h.e.cfg.Signals["any_guest_running"] = sig
+
+	h.wake(t, "muscle1")
+	// empty, and every condition for powering it off agrees. Stop one pass
+	// short of the grace expiring.
+	h.settle(22, 30*time.Second)
+	if h.m.Took("down muscle1") {
+		t.Fatal("precondition: the node should not have been stopped yet")
+	}
+
+	// a guest starts — the world changes, but the engine's cached answer is
+	// only 30s old and will not be re-read on its own this pass.
+	h.m.SetUp("console", true)
+	h.refreshGuests()
+
+	h.pass() // the pass where the grace has run and the stop fires
+
+	if h.m.Took("down muscle1") {
+		t.Fatal("powered the node off with a guest running: the stop path trusted its cache")
+	}
+	for _, v := range h.e.Board().Targets {
+		if v.Name == "muscle1" && v.Blocked != "held-by:!any_guest_running" {
+			t.Fatalf("blocked = %q, want held-by:!any_guest_running", v.Blocked)
+		}
+	}
+
+	// and it must not be wedged: once the guest really goes, the node sleeps.
+	h.m.SetUp("console", false)
+	h.refreshGuests()
+	h.settle(26, 30*time.Second)
+	if !h.m.Took("down muscle1") {
+		t.Fatal("the node never slept after the guest went away")
+	}
+}
