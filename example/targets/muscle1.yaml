@@ -5,4 +5,6 @@ muscle1:
   on_demand: true        # REQUIRED — a node that has not said this can never be a target
   up_timeout: 3m
   min_uptime: 5m
-  wake_backstop: "03:00" # armed on the machine before it sleeps; a backstop may WAKE, never stop
+  # No wake backstop here on purpose: the machine arms its own RTC alarm at
+  # its own shutdown. If it were armed by Le Veilleur, a compromised watchman
+  # could silently stop the backups from ever waking the tower.

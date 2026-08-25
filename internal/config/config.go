@@ -61,9 +61,13 @@ type Target struct {
 	// what claims used to cover by accident, and the gap that lost a backup.
 	MinUptime Duration `yaml:"min_uptime" json:"min_uptime"`
 
-	// WakeBackstop arms the machine's own RTC alarm before it sleeps. A
-	// backstop may wake; it may never stop (§A.6).
-	WakeBackstop string `yaml:"wake_backstop" json:"wake_backstop,omitempty"`
+	// NOTE: there is deliberately no wake_backstop here. An earlier draft had
+	// Le Veilleur arm the machine's RTC alarm before putting it to sleep —
+	// which makes the guarantee that backups happen depend on the very
+	// component you must assume can be compromised. The alarm stays owned by
+	// the machine itself (squat-rtc-alarm, armed at its own shutdown), on
+	// hardware Le Veilleur cannot reach. It is the one boundary that does not
+	// trust the watchman at all.
 }
 
 // Down says when a target may stop and what that may free.
