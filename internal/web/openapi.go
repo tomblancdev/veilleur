@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-// The published contract (power.md §5): anything in the lab can be a client
-// of Le Veilleur with curl and this document — no library, no SDK.
+// The published contract: anything in the lab can be a client with curl and
+// this document — no SDK, no library. Three nouns: targets, signals, holds.
 func (s *Server) openapi(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_, _ = w.Write([]byte(strings.ReplaceAll(openapiJSON, "{{VERSION}}", s.version)))
@@ -17,8 +17,8 @@ const openapiJSON = `{
   "info": {
     "title": "Le Veilleur",
     "version": "{{VERSION}}",
-    "summary": "The watchman: claims decide which machines are awake.",
-    "description": "A target is up while any claim on it - or on anything that requires it - is held. Guards only ever refuse to stop something. Every claim expires.",
+    "summary": "The watchman: machines are awake while something says they are in use.",
+    "description": "Ask for a target and everything it needs is raised, parents first. What keeps a thing up afterwards is a SIGNAL - a named question answered by a command on a node - not a lease anyone has to remember to renew. A signal that cannot be answered blocks a stop; it never permits one. Only a target named in a 'manages' list is ever stopped.",
     "license": { "name": "MIT" }
   },
   "servers": [{ "url": "/" }],
@@ -29,47 +29,32 @@ const openapiJSON = `{
       "forwardAuth": { "type": "apiKey", "in": "header", "name": "Remote-User", "description": "Set by the reverse proxy after SSO; believed only from a trusted proxy." }
     },
     "schemas": {
-      "Claim": {
-        "type": "object",
-        "properties": {
-          "id": { "type": "string" },
-          "seq": { "type": "integer" },
-          "subject": { "type": "string" },
-          "via": { "type": "string" },
-          "target": { "type": "string" },
-          "reason": { "type": "string" },
-          "held_since": { "type": "string", "format": "date-time" },
-          "deadline": { "type": "string", "format": "date-time" },
-          "release": { "type": "string", "enum": ["explicit", "idle", "deadline"] },
-          "last_active": { "type": "string", "format": "date-time" },
-          "released_at": { "type": "string", "format": "date-time" },
-          "released_by": { "type": "string" }
-        }
-      },
-      "ClaimRequest": {
-        "type": "object",
-        "properties": {
-          "target": { "type": "string" },
-          "reason": { "type": "string", "description": "Why. It ends up in Loki; write it for the person reading at 3 a.m." },
-          "release": { "type": "string", "enum": ["explicit", "idle", "deadline"], "default": "explicit" },
-          "hold": { "type": "string", "description": "Duration such as 2h. Clamped to the target's max_hold." },
-          "idle_after": { "type": "string", "description": "Duration; required when release is idle and the target declares none." }
-        }
-      },
       "Target": {
         "type": "object",
         "properties": {
           "name": { "type": "string" },
           "kind": { "type": "string", "enum": ["node", "guest"] },
-          "node": { "type": "string" },
-          "vmid": { "type": "integer" },
-          "requires": { "type": "array", "items": { "type": "string" } },
+          "node": { "type": "string", "description": "The machine that answers for it." },
+          "needs": { "type": "array", "items": { "type": "string" }, "description": "The WAKE chain, and only the wake chain." },
+          "min_uptime": { "type": "string", "description": "Not eligible to stop until it has been up this long AND every stop_when signal has answered at least once." },
           "up": { "type": "boolean" },
-          "wanted": { "type": "boolean" },
-          "wanted_by": { "type": "array", "items": { "type": "string" } },
-          "blocked": { "type": "string", "description": "Why it was not stopped: grace, dependent:<name> or guard:<name>." },
-          "pending": { "type": "string" },
-          "last_error": { "type": "string" }
+          "known": { "type": "boolean", "description": "false = its state probe could not be answered." },
+          "managed": { "type": "boolean", "description": "false = never stopped by Le Veilleur, whatever the signals say." },
+          "stop_when": { "type": "array", "items": { "type": "string" } },
+          "blocked": { "type": "string", "description": "Why it is not being stopped: grace, min_uptime, hands-off, unknown:<signal>, held-by:<ref>." },
+          "holds": { "type": "array", "items": { "$ref": "#/components/schemas/Hold" } }
+        }
+      },
+      "Hold": {
+        "type": "object",
+        "description": "The only state a person writes. It has no expiry - a person decided, and a person can be asked - so it carries who and why, and ages loudly.",
+        "properties": {
+          "id": { "type": "string" },
+          "target": { "type": "string" },
+          "by": { "type": "string" },
+          "reason": { "type": "string" },
+          "since": { "type": "string", "format": "date-time" },
+          "hands_off": { "type": "boolean", "description": "Also refuse to START it - for when you are working on the machine." }
         }
       },
       "Error": { "type": "object", "properties": { "error": { "type": "string" } } }
@@ -78,13 +63,8 @@ const openapiJSON = `{
   "paths": {
     "/api/targets": {
       "get": {
-        "summary": "The board: every target, its state, and what holds it up.",
-        "responses": { "200": { "description": "the board", "content": { "application/json": { "schema": {
-          "type": "object", "properties": {
-            "at": { "type": "string", "format": "date-time" },
-            "source": { "type": "string" },
-            "observe_error": { "type": "string" },
-            "targets": { "type": "array", "items": { "$ref": "#/components/schemas/Target" } } } } } } } }
+        "summary": "The board: every target, its state, and why it is not stopping.",
+        "responses": { "200": { "description": "the board" } }
       }
     },
     "/api/targets/{name}": {
@@ -93,50 +73,57 @@ const openapiJSON = `{
         "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }],
         "responses": {
           "200": { "description": "the target", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Target" } } } },
-          "404": { "description": "no such target", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+          "404": { "description": "no such target" }
         }
       }
     },
-    "/api/targets/{name}/ensure": {
+    "/api/targets/{name}/wake": {
       "post": {
         "summary": "I need this up.",
-        "description": "Takes a claim and drives the whole chain up (wake the node, then start the guest). Returns at once with what is still missing and a rough ETA; poll /api/targets/{name} for readiness.",
+        "description": "Raises the target and everything it needs, parents first, skipping whatever is already up. The request is NOT remembered: once the chain is up, what keeps it up is whatever signal says it is in use. Refused if a hands-off hold stands.",
         "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "requestBody": { "required": false, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClaimRequest" } } } },
-        "responses": { "202": { "description": "claimed; the chain is coming up", "content": { "application/json": { "schema": {
-          "type": "object", "properties": {
-            "claim": { "$ref": "#/components/schemas/Claim" },
+        "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object", "properties": {
+          "reason": { "type": "string", "description": "Ends up in Loki; write it for the person reading at 3 a.m." },
+          "wait": { "type": "boolean", "description": "Block until the chain is up (default: return at once)." } } } } } },
+        "responses": {
+          "200": { "description": "the chain is up (wait: true)" },
+          "202": { "description": "the chain is being raised" },
+          "404": { "description": "no such target" },
+          "409": { "description": "refused - hands-off, or something would not come up" }
+        }
+      }
+    },
+    "/api/signals": {
+      "get": {
+        "summary": "Every signal, its last answer, and what it means.",
+        "description": "true / false / unknown. Unknown blocks a stop; it never permits one.",
+        "responses": { "200": { "description": "signals" } }
+      }
+    },
+    "/api/holds": {
+      "get": { "summary": "Every hold a person has placed.", "responses": { "200": { "description": "holds" } } },
+      "post": {
+        "summary": "Keep something up until further notice.",
+        "description": "Admins only, and a reason is required: a hold has no expiry and may outlive the memory of why it was taken.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object",
+          "required": ["target", "reason"],
+          "properties": {
             "target": { "type": "string" },
-            "up": { "type": "boolean" },
-            "eta_seconds": { "type": "integer" },
-            "chain": { "type": "array", "items": { "$ref": "#/components/schemas/Target" } } } } } } } }
+            "reason": { "type": "string" },
+            "hands_off": { "type": "boolean" } } } } } },
+        "responses": { "201": { "description": "the hold", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Hold" } } } },
+                       "400": { "description": "no target, or no reason" },
+                       "403": { "description": "admins only" } }
       }
     },
-    "/api/claims": {
-      "get": { "summary": "Claims (yours, or all of them if you are an admin).", "responses": { "200": { "description": "claims" } } },
-      "post": {
-        "summary": "Take a claim without driving the chain up.",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClaimRequest" } } } },
-        "responses": { "201": { "description": "the claim", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Claim" } } } } }
-      }
-    },
-    "/api/claims/{id}": {
+    "/api/holds/{id}": {
       "delete": {
-        "summary": "Release a claim.",
+        "summary": "Lift a hold.",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "released" }, "403": { "description": "not your claim" }, "404": { "description": "no such claim" } }
+        "responses": { "200": { "description": "lifted" }, "403": { "description": "admins only" }, "404": { "description": "no such hold" } }
       }
     },
-    "/api/claims/{id}/heartbeat": {
-      "post": {
-        "summary": "Still in use.",
-        "description": "Refreshes an idle-ruled claim. A reporter inside a guest calls this while somebody is actually using it.",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "the claim" } }
-      }
-    },
-    "/api/fleet": { "get": { "summary": "The raw observation: nodes, guests, locks, quorum.", "responses": { "200": { "description": "snapshot" } } } },
-    "/healthz": { "get": { "summary": "Liveness. 503 while the fleet cannot be observed.", "security": [], "responses": { "200": { "description": "ok" }, "503": { "description": "degraded" } } } },
+    "/healthz": { "get": { "summary": "Liveness. 503 while nothing in the fleet can be observed.", "security": [], "responses": { "200": { "description": "ok" }, "503": { "description": "degraded" } } } },
     "/metrics": { "get": { "summary": "Prometheus text exposition.", "security": [], "responses": { "200": { "description": "metrics" } } } }
   }
 }

@@ -1,13 +1,19 @@
-// Package fleet is the brain: it compares the claims to the world and moves
-// the world, once, in dependency order.
+// Package fleet is the brain: it asks signals, and moves machines.
 //
-// The rule, in one line: a target is up while any claim on it — or on
-// anything that requires it — is held; it comes down when that set is empty,
-// its grace has passed, and no guard objects.
+// Two paths, deliberately separate (power.md §A):
+//
+//	WAKE  a request. Resolve `needs`, see what is already up, raise only what
+//	      is missing, parents first. Nothing here consults the down config.
+//	STOP  a loop. For each target some down entry MANAGES, evaluate its
+//	      stop_when signals; UNKNOWN blocks, all-true plus grace acts.
+//
+// Nothing is remembered about who asked. A wake is forgotten once the chain
+// is up; what keeps a thing up afterwards is measured.
 package fleet
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -15,81 +21,63 @@ import (
 
 	"github.com/tomblancdev/veilleur/internal/config"
 	"github.com/tomblancdev/veilleur/internal/door"
-	"github.com/tomblancdev/veilleur/internal/store"
+	"github.com/tomblancdev/veilleur/internal/state"
 )
 
-// TargetView is one row of the board.
-type TargetView struct {
-	config.Target
-	Up            bool          `json:"up"`
-	Known         bool          `json:"known"`
-	Wanted        bool          `json:"wanted"`
-	WantedBy      []string      `json:"wanted_by,omitempty"` // claim ids holding it, directly or through a dependent
-	UnwantedFor   config.Duration `json:"unwanted_for,omitempty"`
-	Blocked       string        `json:"blocked,omitempty"` // the guard refusing to stop it
-	Pending       string        `json:"pending,omitempty"` // an action in flight
-	LastError     string        `json:"last_error,omitempty"`
-	LastChangedAt *time.Time    `json:"last_changed_at,omitempty"`
+// Value is one signal's last answer.
+type Value struct {
+	Known bool      `json:"known"`
+	True  bool      `json:"true"`
+	At    time.Time `json:"at"`
+	Err   string    `json:"error,omitempty"`
 }
 
-// Engine reconciles claims against the fleet.
+// Fresh reports whether the answer is still within its ttl.
+func (v Value) Fresh(now time.Time, ttl time.Duration) bool {
+	return v.Known && now.Sub(v.At) <= ttl
+}
+
+// Engine reconciles the fleet.
 type Engine struct {
-	cfg  *config.Config
-	st   *store.Store
-	fl   door.Fleet
-	log  *slog.Logger
-	now  func() time.Time
+	cfg *config.Config
+	st  *state.Store
+	dr  door.Door
+	log *slog.Logger
+	now func() time.Time
 
-	mu            sync.RWMutex
-	snap          door.Snapshot
-	snapErr       string
-	unwantedSince map[string]time.Time
-	lastError     map[string]string
-	lastChanged   map[string]time.Time
-	blocked       map[string]string
-	pending       map[string]string
-
-	// counters exported on /metrics
-	wakes    map[string]int
-	starts   map[string]int
-	stops    map[string]int
-	refusals map[string]int
-	poweredSince map[string]time.Time
-	poweredTotal map[string]time.Duration
+	mu       sync.RWMutex
+	vals     map[string]Value     // signal -> last answer
+	up       map[string]bool      // target -> observed up
+	upKnown  map[string]bool      // target -> did its state probe answer
+	upSince  map[string]time.Time // target -> when we first saw it up
+	okSince  map[string]time.Time // target -> since when every stop_when agreed
+	blocked  map[string]string    // target -> why it is not being stopped
+	pending  map[string]string    // target -> an action in flight
+	lastErr  map[string]string
+	acts     map[string]int
+	seenSig  map[string]bool // signal -> has ever answered (min_uptime rule)
+	firstErr string
 
 	kick chan struct{}
 }
 
 // New builds an engine.
-func New(cfg *config.Config, st *store.Store, fl door.Fleet, log *slog.Logger) *Engine {
+func New(cfg *config.Config, st *state.Store, dr door.Door, log *slog.Logger) *Engine {
 	return &Engine{
-		cfg: cfg, st: st, fl: fl, log: log,
-		now: time.Now,
-		// NOT healthy until it has actually looked once. An empty snapErr
-		// used to mean "fine", so a watchman whose door was blocked reported
-		// /healthz 200 from boot until its first failed pass — and the
-		// converge's health gate passed on a service that could see nothing.
-		snapErr:       "no observation yet",
-		unwantedSince: map[string]time.Time{},
-		lastError:     map[string]string{},
-		lastChanged:   map[string]time.Time{},
-		blocked:       map[string]string{},
-		pending:       map[string]string{},
-		wakes:         map[string]int{},
-		starts:        map[string]int{},
-		stops:         map[string]int{},
-		refusals:      map[string]int{},
-		poweredSince:  map[string]time.Time{},
-		poweredTotal:  map[string]time.Duration{},
-		kick:          make(chan struct{}, 1),
+		cfg: cfg, st: st, dr: dr, log: log, now: time.Now,
+		vals: map[string]Value{}, up: map[string]bool{}, upKnown: map[string]bool{},
+		upSince: map[string]time.Time{}, okSince: map[string]time.Time{},
+		blocked: map[string]string{}, pending: map[string]string{},
+		lastErr: map[string]string{}, acts: map[string]int{}, seenSig: map[string]bool{},
+		firstErr: "no observation yet",
+		kick:     make(chan struct{}, 1),
 	}
 }
 
 // SetClock replaces the clock (tests).
 func (e *Engine) SetClock(f func() time.Time) { e.now = f }
 
-// Kick asks for a reconcile as soon as possible — every mutation calls it,
-// so a claim taken through the API acts now instead of at the next tick.
+// Kick asks for a pass as soon as possible.
 func (e *Engine) Kick() {
 	select {
 	case e.kick <- struct{}{}:
@@ -97,247 +85,302 @@ func (e *Engine) Kick() {
 	}
 }
 
-// Run reconciles on a ticker and whenever kicked, until ctx is done.
+// Run loops until ctx is done.
 func (e *Engine) Run(ctx context.Context) {
-	t := time.NewTicker(e.cfg.ReconcileInterval.D())
+	t := time.NewTicker(e.cfg.Interval.D())
 	defer t.Stop()
-	e.Reconcile(ctx)
+	e.Pass(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			e.Reconcile(ctx)
+			e.Pass(ctx)
 		case <-e.kick:
-			e.Reconcile(ctx)
+			e.Pass(ctx)
 		}
 	}
 }
 
-// onDemandNodes are the node targets — the only nodes we ever ask local
-// questions of, and the only ones we may power off.
-func (e *Engine) onDemandNodes() []string {
-	var out []string
-	for _, n := range e.cfg.TargetNames() {
-		if t := e.cfg.Targets[n]; t.Kind == config.KindNode {
-			out = append(out, t.Node)
-		}
-	}
-	return out
-}
+// --- observing ------------------------------------------------------------
 
-// Reconcile is one pass: observe, decide, act.
-func (e *Engine) Reconcile(ctx context.Context) {
+// evalSignal returns the current value of a signal, refreshing it if stale.
+// A hold: signal is answered from the store, not from a node.
+func (e *Engine) evalSignal(ctx context.Context, name string) Value {
 	now := e.now()
-	// an expiry is an event, not an absence
-	for _, c := range e.st.Sweep(now) {
-		e.log.Info("claim expired", "claim", c.ID, "target", c.Target, "subject", c.Subject, "rule", c.ReleasedBy)
+	if target, ok := holdTarget(name); ok {
+		v := Value{Known: true, True: len(e.st.On(target)) > 0, At: now}
+		e.setVal(name, v)
+		return v
 	}
-
-	snap, err := e.fl.Observe(ctx, e.onDemandNodes())
+	sig, ok := e.cfg.Signals[name]
+	if !ok {
+		return Value{Known: false, At: now, Err: "signal not declared"}
+	}
+	e.mu.RLock()
+	prev, had := e.vals[name]
+	e.mu.RUnlock()
+	if had && prev.Fresh(now, sig.TTL.D()) {
+		return prev
+	}
+	ans, err := e.dr.Signal(ctx, sig.RunOn, name)
+	v := Value{At: now}
 	if err != nil {
-		// FAIL AS-IS (power.md decision 6): if we cannot see the fleet we
-		// touch nothing at all. Never power off what you cannot reason about.
-		e.mu.Lock()
-		e.snapErr = err.Error()
-		e.mu.Unlock()
-		e.log.Error("observe failed — doing nothing this pass", "err", err)
-		return
+		v.Known = false
+		v.Err = err.Error()
+	} else {
+		v.Known = true
+		v.True = ans.True()
+	}
+	e.setVal(name, v)
+	return v
+}
+
+func (e *Engine) setVal(name string, v Value) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.vals[name] = v
+	if v.Known {
+		e.seenSig[name] = true
+	}
+}
+
+// probe asks a target's own state probe.
+func (e *Engine) probe(ctx context.Context, name string) (up bool, known bool) {
+	t := e.cfg.Targets[name]
+	node := t.Node
+	if t.Kind == config.KindNode {
+		node = config.AnyControl // a sleeping node cannot answer for itself
+	}
+	ans, err := e.dr.Act(ctx, node, "state", name)
+	now := e.now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err != nil {
+		e.upKnown[name] = false
+		e.lastErr[name] = err.Error()
+		return false, false
+	}
+	delete(e.lastErr, name)
+	e.upKnown[name] = true
+	e.up[name] = ans.True()
+	if ans.True() {
+		if _, seen := e.upSince[name]; !seen {
+			e.upSince[name] = now
+		}
+	} else {
+		delete(e.upSince, name)
+		delete(e.okSince, name)
+	}
+	return ans.True(), true
+}
+
+// Pass is one reconcile: observe, then consider stopping.
+func (e *Engine) Pass(ctx context.Context) {
+	anyKnown := false
+	for _, name := range e.cfg.TargetNames() {
+		if _, known := e.probe(ctx, name); known {
+			anyKnown = true
+		}
 	}
 	e.mu.Lock()
-	e.snap, e.snapErr = snap, ""
-	e.accountPowerLocked(snap, now)
+	if anyKnown {
+		e.firstErr = ""
+	} else if e.firstErr == "" {
+		e.firstErr = "no target could be observed"
+	}
 	e.mu.Unlock()
+	if !anyKnown {
+		// FAIL AS-IS: if we cannot see the fleet we touch nothing at all.
+		e.log.Error("no target could be observed — doing nothing this pass")
+		return
+	}
+	e.stopPass(ctx)
+}
 
-	wanted, by := e.Wanted(now)
-	order := e.cfg.Order()
+// --- the stop path --------------------------------------------------------
 
-	// UP pass, in dependency order: a parent is started before its children.
-	for _, name := range order {
-		t := e.cfg.Targets[name]
-		if !wanted[name] || e.isUp(snap, t) || !t.Managed() {
+func (e *Engine) stopPass(ctx context.Context) {
+	// children before the things they run on: a down entry's ThenConsider
+	// names what may be freed, so evaluate in Manages order and revisit.
+	for _, name := range e.stopOrder() {
+		e.considerDown(ctx, name)
+	}
+}
+
+// stopOrder lists managed targets, guests before the nodes they run on.
+func (e *Engine) stopOrder() []string {
+	var guests, nodes []string
+	for _, n := range e.cfg.TargetNames() {
+		if !e.cfg.Managed(n) {
 			continue
 		}
-		if !e.requiresUp(snap, t) {
-			continue // its parent is still coming up; next pass
+		if e.cfg.Targets[n].Kind == config.KindNode {
+			nodes = append(nodes, n)
+		} else {
+			guests = append(guests, n)
 		}
-		e.bringUp(ctx, t, by[name], now)
 	}
-
-	// DOWN pass, in reverse: children stop before the thing they require.
-	for i := len(order) - 1; i >= 0; i-- {
-		name := order[i]
-		t := e.cfg.Targets[name]
-		if !e.isUp(snap, t) {
-			e.clearUnwanted(name)
-			continue
-		}
-		if wanted[name] {
-			e.clearUnwanted(name)
-			continue
-		}
-		if !t.Managed() {
-			continue
-		}
-		e.considerDown(ctx, t, snap, now)
-	}
+	sort.Strings(guests)
+	sort.Strings(nodes)
+	return append(guests, nodes...)
 }
 
-// Wanted computes the desired state: every target with a held claim, plus
-// everything those targets require, transitively. Returns the map and, for
-// each target, the claim ids responsible.
-func (e *Engine) Wanted(now time.Time) (map[string]bool, map[string][]string) {
-	wanted := map[string]bool{}
-	by := map[string][]string{}
-	for _, c := range e.st.Held(now) {
-		if _, ok := e.cfg.Targets[c.Target]; !ok {
-			continue // a claim on a target that no longer exists holds nothing
-		}
-		wanted[c.Target] = true
-		by[c.Target] = append(by[c.Target], c.ID)
+func (e *Engine) considerDown(ctx context.Context, name string) {
+	t := e.cfg.Targets[name]
+	d, hasDown := e.cfg.Downs[name]
+	if !hasDown {
+		return
 	}
-	// propagate down the graph until nothing changes: the tower is up
-	// because the console is, and the console is up because someone plays.
-	for changed := true; changed; {
-		changed = false
-		for name := range wanted {
-			for _, r := range e.cfg.Targets[name].Requires {
-				if !wanted[r] {
-					wanted[r] = true
-					changed = true
-				}
-				for _, id := range by[name] {
-					if !contains(by[r], id) {
-						by[r] = append(by[r], id)
-					}
-				}
-			}
-		}
+	e.mu.RLock()
+	up, known := e.up[name], e.upKnown[name]
+	upSince := e.upSince[name]
+	e.mu.RUnlock()
+	if !known || !up {
+		e.clear(name)
+		return
 	}
-	for k := range by {
-		sort.Strings(by[k])
+	if e.st.HandsOff(name) {
+		e.setBlocked(name, "hands-off")
+		return
 	}
-	return wanted, by
-}
+	now := e.now()
 
-func (e *Engine) isUp(snap door.Snapshot, t config.Target) bool {
-	if t.Kind == config.KindNode {
-		return snap.NodeUp(t.Node)
+	// min_uptime: a thing just raised is not yet idle. Between "raised" and
+	// "in use" every activity signal honestly says no — that gap is how a
+	// backup was lost (power.md §A.2 rule 4).
+	if !upSince.IsZero() && now.Sub(upSince) < t.MinUptime.D() {
+		e.setBlocked(name, "min_uptime")
+		return
 	}
-	return snap.Running(t.VMID)
-}
 
-func (e *Engine) requiresUp(snap door.Snapshot, t config.Target) bool {
-	for _, r := range t.Requires {
-		if !e.isUp(snap, e.cfg.Targets[r]) {
-			return false
+	allTrue := true
+	for _, ref := range d.StopWhen {
+		sig, negated := config.SignalRef(ref)
+		v := e.evalSignal(ctx, sig)
+		if !v.Known {
+			e.setBlocked(name, "unknown:"+sig)
+			e.clearOK(name)
+			return // UNKNOWN blocks a stop; it never permits one
 		}
-	}
-	return true
-}
-
-func (e *Engine) bringUp(ctx context.Context, t config.Target, why []string, now time.Time) {
-	var err error
-	switch t.Kind {
-	case config.KindNode:
-		if !t.WOL {
-			return // nothing we know how to do; it must be woken by hand
-		}
-		e.setPending(t.Name, "waking")
-		e.log.Info("waking", "target", t.Name, "node", t.Node, "claims", why)
-		err = e.fl.Wake(ctx, t.Node)
-		e.bump(e.wakes, t.Name)
-	case config.KindGuest:
-		e.setPending(t.Name, "starting")
-		e.log.Info("starting", "target", t.Name, "vmid", t.VMID, "claims", why)
-		err = e.fl.StartGuest(ctx, t.VMID)
-		e.bump(e.starts, t.Name)
-	}
-	e.finish(t.Name, err, now)
-}
-
-// considerDown applies the grace, the dependents and the guards, in that
-// order, and says out loud why it did not act.
-func (e *Engine) considerDown(ctx context.Context, t config.Target, snap door.Snapshot, now time.Time) {
-	// something that requires it is still up: wait for the child.
-	for _, d := range e.cfg.Dependents(t.Name) {
-		if e.isUp(snap, e.cfg.Targets[d]) {
-			e.setBlocked(t.Name, "dependent:"+d)
+		e.mu.RLock()
+		everSeen := e.seenSig[sig]
+		e.mu.RUnlock()
+		if !everSeen {
+			e.setBlocked(name, "never-answered:"+sig)
+			e.clearOK(name)
 			return
 		}
+		want := v.True
+		if negated {
+			want = !want
+		}
+		if !want {
+			e.setBlocked(name, "held-by:"+ref)
+			e.clearOK(name)
+			allTrue = false
+			break
+		}
 	}
-	since := e.markUnwanted(t.Name, now)
-	if now.Sub(since) < t.DownGrace.D() {
-		e.setBlocked(t.Name, "grace")
+	if !allTrue {
 		return
 	}
-	if g := e.veto(t, snap); g != "" {
-		e.setBlocked(t.Name, "guard:"+g)
-		e.bump(e.refusals, g)
-		e.log.Info("stop refused", "target", t.Name, "guard", g)
+
+	// every condition agrees; the grace runs from the moment they did
+	e.mu.Lock()
+	if _, ok := e.okSince[name]; !ok {
+		e.okSince[name] = now
+	}
+	since := e.okSince[name]
+	e.mu.Unlock()
+	if now.Sub(since) < d.Grace.D() {
+		e.setBlocked(name, "grace")
 		return
 	}
-	e.setBlocked(t.Name, "")
-	var err error
-	switch t.Kind {
-	case config.KindNode:
-		e.setPending(t.Name, "powering off")
-		e.log.Info("powering off", "target", t.Name, "node", t.Node, "unwanted_for", now.Sub(since).String())
-		err = e.fl.PowerOffNode(ctx, t.Node)
-	case config.KindGuest:
-		e.setPending(t.Name, "stopping")
-		e.log.Info("stopping", "target", t.Name, "vmid", t.VMID, "unwanted_for", now.Sub(since).String())
-		err = e.fl.StopGuest(ctx, t.VMID)
+
+	e.setBlocked(name, "")
+	e.setPending(name, "stopping")
+	e.log.Info("stopping", "target", name, "kind", t.Kind,
+		"quiet_for", now.Sub(since).Truncate(time.Second).String(),
+		"because", d.StopWhen)
+	node := t.Node
+	if t.Kind == config.KindNode {
+		node = t.Name // a node powers itself off; its own door refuses if it may not
 	}
-	e.bump(e.stops, t.Name)
-	e.finish(t.Name, err, now)
+	_, err := e.dr.Act(ctx, node, "down", name)
+	e.finish(name, "stop", err)
+	if err == nil {
+		e.mu.Lock()
+		delete(e.upSince, name)
+		delete(e.okSince, name)
+		e.up[name] = false
+		e.mu.Unlock()
+		for _, next := range d.ThenConsider {
+			e.considerDown(ctx, next)
+		}
+	}
 }
 
-// veto returns the first guard refusing to stop this target, or "".
-func (e *Engine) veto(t config.Target, snap door.Snapshot) string {
-	for _, g := range t.Guards {
-		switch g {
-		case "human_session":
-			n, ok := snap.Nodes[t.Node]
-			// unknown (-1) counts as occupied: we cannot see, so we do not act
-			if !ok || n.TTYs != 0 {
-				return g
-			}
-		case "maintenance_lock":
-			if snap.Locks["maintenance"] {
-				return g
-			}
-		case "converge_lock":
-			if snap.Locks["converge"] {
-				return g
-			}
-		case "cluster_whole":
-			// the fencing rule (architecture §4): never leave while the
-			// 24/7 pair is short, or the survivor drops below quorum.
-			if snap.ClusterTotal == 0 || snap.ClusterOnline < snap.ClusterTotal {
-				return g
-			}
-		case "ha_resident":
-			if gs, ok := snap.Guests[t.VMID]; ok && gs.HA {
-				return g
-			}
+// --- the wake path --------------------------------------------------------
+
+// Wake raises a target and everything it needs, parents first. It returns
+// when the chain is up or a timeout is hit; the caller decides whether to
+// wait for it.
+func (e *Engine) Wake(ctx context.Context, name, why string) error {
+	chain := e.cfg.Chain(name)
+	if chain == nil {
+		return fmt.Errorf("no such target: %q", name)
+	}
+	for _, step := range chain {
+		if e.st.HandsOff(step) {
+			return fmt.Errorf("%s is hands-off — a person asked for it to be left alone", step)
+		}
+		if up, known := e.probe(ctx, step); known && up {
+			continue
+		}
+		t := e.cfg.Targets[step]
+		node := t.Node
+		if t.Kind == config.KindNode {
+			node = config.AnyControl
+		}
+		e.setPending(step, "raising")
+		e.log.Info("raising", "target", step, "kind", t.Kind, "why", why)
+		_, err := e.dr.Act(ctx, node, "up", step)
+		e.finish(step, "up", err)
+		if err != nil {
+			return fmt.Errorf("raising %s: %w", step, err)
+		}
+		if err := e.await(ctx, step, t.UpTimeout.D()); err != nil {
+			return err
 		}
 	}
-	// a hard boundary, not a configurable guard: an HA-managed guest is the
-	// HA manager's to stop, never ours (power.md decision 7).
-	if t.Kind == config.KindGuest {
-		if gs, ok := snap.Guests[t.VMID]; ok && gs.HA {
-			return "ha_resident"
-		}
-	}
-	return ""
+	e.Kick()
+	return nil
 }
 
-func contains(s []string, v string) bool {
-	for _, x := range s {
-		if x == v {
-			return true
+// await polls a target's own state probe until it says up.
+func (e *Engine) await(ctx context.Context, name string, timeout time.Duration) error {
+	deadline := e.now().Add(timeout)
+	for {
+		if up, known := e.probe(ctx, name); known && up {
+			e.setPending(name, "")
+			return nil
+		}
+		if e.now().After(deadline) {
+			e.setPending(name, "")
+			return fmt.Errorf("%s did not come up within %s", name, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
 		}
 	}
-	return false
+}
+
+func holdTarget(sig string) (string, bool) {
+	if len(sig) > len(config.HoldPrefix) && sig[:len(config.HoldPrefix)] == config.HoldPrefix {
+		return sig[len(config.HoldPrefix):], true
+	}
+	return "", false
 }

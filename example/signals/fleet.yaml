@@ -1,0 +1,35 @@
+# A signal is a named question. The node runs the command; a 0 exit means the
+# `means:` sentence is TRUE. A question that cannot be put is UNKNOWN, and
+# UNKNOWN blocks a stop — it never permits one.
+#
+# Nothing of ours runs inside a guest: a guest is observed from its node.
+
+console_in_use:
+  run_on: muscle1
+  means: "a client is connected to the console, or somebody has a shell on it"
+  ttl: 90s
+
+pbs_working:
+  run_on: muscle1
+  means: "the backup server has a task running, or somebody on it"
+  ttl: 90s
+
+any_guest_running:
+  run_on: muscle1
+  means: "at least one guest is running on the tower — including ones we do not manage"
+  ttl: 60s
+
+human_session:
+  run_on: muscle1
+  means: "somebody is logged in at a real tty on the tower"
+  ttl: 60s
+
+cluster_whole:
+  run_on: any_control
+  means: "every node is online — the fencing rule: never leave while the pair is short"
+  ttl: 60s
+
+converge_running:
+  run_on: any_control
+  means: "a converge holds its lock"
+  ttl: 30s

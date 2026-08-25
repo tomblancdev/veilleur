@@ -16,5 +16,5 @@ COPY --from=build /out/veilleur /veilleur
 VOLUME ["/data"]
 USER 65532:65532
 EXPOSE 8080
-ENV VEILLEUR_CONFIG=/etc/veilleur/config.yaml VEILLEUR_DATA_DIR=/data
+ENV VEILLEUR_CONFIG_DIR=/etc/veilleur VEILLEUR_DATA_DIR=/data
 ENTRYPOINT ["/veilleur"]

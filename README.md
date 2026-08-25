@@ -23,106 +23,93 @@ That is not a special case here. It is what refcounting does.
 [Le Videur](https://github.com/tomblancdev/videur) decides who passes; Le
 Veilleur keeps watch while the house sleeps.
 
-## The one object
+## Three configs, two graphs, one decider
 
-A **claim**: *subject needs target up, because reason, until condition.*
+**`signals/`** — a named question. A command runs on a node; a zero exit means
+the sentence in `means:` is true. That is the only kind of fact this program
+has.
 
-**Targets** are nodes, guests, and (later) services, and they declare what
-they **require**. The rule, whole:
-
-> A target is up while any claim on it — or on anything that requires it — is
-> held. It comes down when that set is empty, its grace has passed, and no
-> guard objects.
-
-```
- a game server ──requires──▶ the servers VM ──requires──┐
-                                                        ├──▶ muscle1 (on demand)
- the console  ─────────────────────requires─────────────┤
- the backups  ─────────────────────requires─────────────┘
+```yaml
+console_in_use:
+  run_on: muscle1        # its NODE. Nothing of ours runs inside a guest.
+  means: "a client is connected, or somebody has a shell on it"
+  ttl: 90s
 ```
 
-**Guards** only ever refuse to *stop* something — never to start it: somebody
-logged in, a maintenance pass, a converge running, the cluster not whole
-(never leave a quorum short), an HA-managed guest. A guard that cannot be
-evaluated counts as occupied.
+**`targets/`** — what exists, what it `needs` before it can start, and how
+long after being raised it is allowed to be considered idle.
 
-## What it will not do
+**`down/`** — when a thing may stop, and what that may free. **Deliberately
+not the inverse of `needs`**, because things also get started by hand, by an
+autostart flag, or by another service — and a stop chain derived from the
+wake chain cannot see any of them.
 
-- **Never powers a 24/7 node.** A node target must declare `on_demand: true`
-  or the config is refused, and each node's own copy of the forced command
-  refuses a `poweroff` it was not built to accept.
-- **Never stops an HA resource.** That is the cluster manager's job.
-- **Never acts blind.** If it cannot observe the fleet it does *nothing* —
-  losing power savings is cheap; powering off a machine somebody is using is
-  not. It fails *as-is*, which is the opposite of how a bouncer should fail.
-- **It is not a scheduler.** Your timers still fire; only the power decisions
-  move here.
-
-## Talking to it
-
-An [OpenAPI](internal/web/openapi.go) document at `/openapi.json` — no SDK,
-no library. The verb most clients want is *ensure*:
-
-```sh
-curl -sX POST -H "Authorization: Bearer $TOKEN" \
-     -d '{"reason":"play page: wake it","hold":"6h"}' \
-     https://veilleur.example.net/api/targets/console/ensure
-# 202 {"claim":{...},"up":false,"eta_seconds":240,"chain":[{"name":"muscle1",...}]}
+```yaml
+muscle1:
+  stop_when:
+    - "!any_guest_running"   # measured, not inferred from who asked
+    - "!human_session"
+    - "!hold:muscle1"
+    - "cluster_whole"        # never leave a cluster short - a plain signal
+  grace: 10m
+  manages: [muscle1]         # the ONLY things this may stop
 ```
 
-Then release it when you are done — or let it expire, because **everything
-expires**: a claim carries a deadline whatever its release rule, so a client
-that dies cannot pin a machine on forever.
+## The rules, each one paid for
 
-`explicit` (the client says when) · `idle` (the target reports it is unused,
-refreshed by heartbeats) · `deadline` (the clock alone).
+- **A stop needs a positive answer, never an absence.** "Nothing has claimed
+  it" and "no log arrived" are not evidence that nobody is using a machine.
+- **UNKNOWN blocks a stop; it never permits one.** A question that cannot be
+  put reads as *possibly in use*.
+- **Only what a `manages` list names is ever stopped.** A guest someone
+  started by hand is untouched — and it keeps its machine up, which is
+  correct.
+- **A thing just raised is not yet idle** (`min_uptime`). Between "raised"
+  and "in use" every activity signal honestly says no. Without a floor, the
+  stop path undoes the wake — which is exactly how a backup server was
+  stopped one minute after being woken for the night's backup.
+- **Backstops may wake. Backstops may not stop.** A stop-backstop races the
+  thing it is backing up; a wake-backstop can only cost idle minutes.
 
-Humans get a board at `/`: what is up, what holds it up, what is refusing to
-sleep and why, and a *hold it for 2 h* button.
+## Holding something up
 
-## Reporting from inside
+A **hold** is the only state a person writes, and the only thing without an
+expiry — because a person decided, and a person can be asked. It carries who
+and why, and it ages loudly. `hands_off` additionally refuses to *start* the
+target: for when you are working on the machine.
 
-A target can say *"I am in use"* instead of being guessed at. `deploy/agent/veilleur-report`
-is a POSIX shell script (curl, nothing else) that holds an **idle-ruled
-claim** on its own target and refreshes it while an activity check passes:
+## Nothing of ours runs inside a guest
 
-```sh
-veilleur-report --url https://veilleur.example.net \
-                --target console --activity /usr/local/bin/is-someone-playing
-```
-
-The activity check is whatever "in use" means for that service — exit 0 = in
-use — and it lives with the service, not here. When activity stops the
-reporter simply stops talking; the claim ages out on the server's side and
-**Le Veilleur** decides what to do about it. A reporter that dies cannot slam
-the door, and a brief pause does not cost a restart.
-
-That division is the point, and it was learned the hard way: a guest that
-decides for itself races the watchman. In this design's first week the games
-console's own 20-minute watchdog powered the box off twice *inside a held
-claim*, and the watchman dutifully restarted it each time — two interruptions
-to a real game. **One decider, many reporters.**
+A guest is *observed* from its node. Where the firewall is on a guest's NIC
+the node's own conntrack already carries that guest's flows, tagged with its
+vmid — so "is anybody using this?" is a question the node can answer with no
+agent, no credential and no door opened into the guest. Where that is not
+enough, `qm guest exec` runs a command in the guest over virtio, which is
+still a command on a hypervisor.
 
 ## How it touches machines
 
 One ssh key restricted to one forced command on every hypervisor —
-[`squat-veilleur`](deploy/proxmox/squat-veilleur): `status`, `wake <node>`,
-`start <vmid>`, `stop <vmid>`, `poweroff`. Each node renders its own
-allowlist, so the key is not a power-of-attorney over the cluster: a node
-refuses a vmid that is not in the graph, and a 24/7 node refuses to sleep at
-all. Stops are graceful; nothing is ever forced.
+[`squat-veilleur`](deploy/proxmox/squat-veilleur): `signal <name>`,
+`state <target>`, `up <target>`, `down <target>`, `list`.
+
+**The node holds the commands; Le Veilleur only names them.** Every name is
+looked up in that node's own table and never interpolated into a shell, so
+the watchman may ask for `signal console_in_use` but cannot ask for
+`rm -rf /`, and cannot touch a target the node was not given. **A 24/7 node
+refuses to sleep because it simply has no `down:` entry for itself** — not
+because anything remembered to check.
 
 ## Run it
 
 ```sh
 podman run --rm -p 8080:8080 \
   -v ./config.yaml:/etc/veilleur/config.yaml:ro -v ./data:/data \
-  ghcr.io/tomblancdev/veilleur:0.3.1
+  ghcr.io/tomblancdev/veilleur:0.4.0
 ```
 
-`scratch` + one binary, uid 65532, read-only root. Config:
-[`targets.example.yaml`](targets.example.yaml) — the whole product in one
-file. `door.mode: mock` gives you an imaginary fleet that touches nothing.
+`scratch` + one binary, uid 65532, read-only root. Config: [`example/`](example) — `main.yaml` plus the three directories, and
+the `commands.conf` a node holds. `door.mode: mock` gives you an imaginary fleet that touches nothing.
 Structured JSON logs on stdout; Prometheus metrics at `/metrics`, including
 `veilleur_node_powered_seconds_total`, which is how you find out whether any
 of this worked. Reference unit:

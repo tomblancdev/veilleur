@@ -1,0 +1,8 @@
+muscle1:
+  kind: node
+  node: muscle1
+  label: "the on-demand tower"
+  on_demand: true        # REQUIRED — a node that has not said this can never be a target
+  up_timeout: 3m
+  min_uptime: 5m
+  wake_backstop: "03:00" # armed on the machine before it sleeps; a backstop may WAKE, never stop

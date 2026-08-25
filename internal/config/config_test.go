@@ -1,103 +1,177 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-func base() *Config {
-	return &Config{
-		DoorCfg: Door{Mode: "mock"},
-		Targets: map[string]Target{
-			"muscle1": {Kind: KindNode, Node: "muscle1", OnDemand: true},
-			"console": {Kind: KindGuest, VMID: 5001, Node: "muscle1", Requires: []string{"muscle1"}},
-		},
+func write(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func lab(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	write(t, dir, "main.yaml", "house: Le Squat\ninterval: 30s\ndoor: { mode: mock }\n")
+	write(t, dir, "signals/fleet.yaml", `
+console_in_use: { run_on: muscle1, means: "somebody is streaming", ttl: 90s }
+any_guest_running: { run_on: muscle1, means: "a guest is running" }
+`)
+	write(t, dir, "targets/muscle1.yaml", `
+muscle1: { kind: node, node: muscle1, on_demand: true, up_timeout: 3m, down_grace: 10m }
+`)
+	write(t, dir, "targets/console.yaml", `
+console: { kind: guest, node: muscle1, needs: [muscle1], min_uptime: 10m }
+`)
+	write(t, dir, "down/all.yaml", `
+console: { stop_when: ["!console_in_use"], grace: 2m, manages: [console], then_consider: [muscle1] }
+muscle1: { stop_when: ["!any_guest_running"], grace: 10m, manages: [muscle1] }
+`)
+	return dir
+}
+
+func TestLoadsThreeDirectories(t *testing.T) {
+	c, err := Load(lab(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Signals) != 2 || len(c.Targets) != 2 || len(c.Downs) != 2 {
+		t.Fatalf("signals=%d targets=%d downs=%d", len(c.Signals), len(c.Targets), len(c.Downs))
+	}
+	if c.Signals["console_in_use"].TTL.D() != 90*time.Second {
+		t.Errorf("ttl should parse: %s", c.Signals["console_in_use"].TTL.D())
+	}
+	if c.Targets["console"].MinUptime.D() != 10*time.Minute {
+		t.Errorf("min_uptime should parse: %s", c.Targets["console"].MinUptime.D())
+	}
+	// defaults fill in where the file is silent
+	if c.Targets["muscle1"].MinUptime.D() == 0 {
+		t.Error("min_uptime must never be zero — that is the gap that lost a backup")
 	}
 }
 
 // The hard boundary: a node that has not declared itself on-demand can never
-// become a target, so a 24/7 node cannot be powered off by a typo.
+// be a target, so a 24/7 node cannot be powered off by a typo.
 func TestNodeTargetMustBeOnDemand(t *testing.T) {
-	c := base()
-	c.Targets["infra1"] = Target{Kind: KindNode, Node: "infra1"}
-	err := c.Validate()
+	dir := lab(t)
+	write(t, dir, "targets/infra1.yaml", "infra1: { kind: node, node: infra1 }\n")
+	_, err := Load(dir)
 	if err == nil || !strings.Contains(err.Error(), "on_demand") {
 		t.Fatalf("want an on_demand refusal, got %v", err)
 	}
 }
 
-func TestRejectsUnknownRequiresAndCycles(t *testing.T) {
-	c := base()
-	c.Targets["console"] = Target{Kind: KindGuest, VMID: 5001, Node: "muscle1", Requires: []string{"nowhere"}}
-	if err := c.Validate(); err == nil {
-		t.Fatal("a requires pointing nowhere must be refused")
+func TestRefusesUnknownSignalInStopWhen(t *testing.T) {
+	dir := lab(t)
+	write(t, dir, "down/all.yaml", `
+console: { stop_when: ["!nobody_declared_this"], manages: [console] }
+`)
+	_, err := Load(dir)
+	if err == nil || !strings.Contains(err.Error(), "not declared") {
+		t.Fatalf("want a refusal naming the signal, got %v", err)
 	}
+}
 
-	c = base()
-	c.Targets["a"] = Target{Kind: KindGuest, VMID: 1, Node: "muscle1", Requires: []string{"b"}}
-	c.Targets["b"] = Target{Kind: KindGuest, VMID: 2, Node: "muscle1", Requires: []string{"a"}}
-	err := c.Validate()
+// A hold: reference is dynamic and must not need declaring.
+func TestHoldSignalsNeedNoDeclaration(t *testing.T) {
+	dir := lab(t)
+	write(t, dir, "down/all.yaml", `
+console: { stop_when: ["!console_in_use", "!hold:console"], manages: [console] }
+muscle1: { stop_when: ["!any_guest_running"], manages: [muscle1] }
+`)
+	if _, err := Load(dir); err != nil {
+		t.Fatalf("hold: signals are written by a person, not declared: %v", err)
+	}
+}
+
+func TestRefusesEmptyStopWhen(t *testing.T) {
+	dir := lab(t)
+	write(t, dir, "down/all.yaml", "console: { stop_when: [], manages: [console] }\n")
+	_, err := Load(dir)
+	if err == nil || !strings.Contains(err.Error(), "stop_when is empty") {
+		t.Fatalf("a target with no stop condition would stop the moment it is unwanted: %v", err)
+	}
+}
+
+func TestRefusesCyclesAndUnknownNeeds(t *testing.T) {
+	dir := lab(t)
+	write(t, dir, "targets/console.yaml", "console: { kind: guest, node: muscle1, needs: [nowhere] }\n")
+	if _, err := Load(dir); err == nil {
+		t.Fatal("a needs pointing nowhere must be refused")
+	}
+	dir = lab(t)
+	write(t, dir, "targets/loop.yaml", `
+a: { kind: guest, node: muscle1, needs: [b] }
+b: { kind: guest, node: muscle1, needs: [a] }
+`)
+	_, err := Load(dir)
 	if err == nil || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("want a cycle refusal, got %v", err)
 	}
 }
 
-func TestRejectsUnknownGuard(t *testing.T) {
-	c := base()
-	tt := c.Targets["muscle1"]
-	tt.Guards = []string{"vibes"}
-	c.Targets["muscle1"] = tt
-	if err := c.Validate(); err == nil {
-		t.Fatal("an unknown guard must be refused, not silently ignored")
+func TestDuplicateKeyAcrossFilesIsRefused(t *testing.T) {
+	dir := lab(t)
+	write(t, dir, "targets/again.yaml", "console: { kind: guest, node: muscle1 }\n")
+	_, err := Load(dir)
+	if err == nil || !strings.Contains(err.Error(), "declared twice") {
+		t.Fatalf("a silently overridden target is a trap: %v", err)
 	}
 }
 
-// Order puts everything a target requires before it.
-func TestOrderIsDependencyOrder(t *testing.T) {
-	c := base()
-	if err := c.Validate(); err != nil {
+func TestManagedAndChain(t *testing.T) {
+	c, err := Load(lab(t))
+	if err != nil {
 		t.Fatal(err)
 	}
-	order := c.Order()
-	var iNode, iGuest = -1, -1
-	for i, n := range order {
-		switch n {
-		case "muscle1":
-			iNode = i
-		case "console":
-			iGuest = i
-		}
+	if !c.Managed("console") || !c.Managed("muscle1") {
+		t.Error("both are named in a manages list")
 	}
-	if iNode < 0 || iGuest < 0 || iNode > iGuest {
-		t.Fatalf("the node must come before the guest that requires it: %v", order)
+	chain := c.Chain("console")
+	if len(chain) != 2 || chain[0] != "muscle1" || chain[1] != "console" {
+		t.Fatalf("the node must come first: %v", chain)
+	}
+}
+
+func TestSignalRef(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		name string
+		neg  bool
+	}{{"a", "a", false}, {"!a", "a", true}, {"not:a", "a", true}, {" !a ", "a", true}} {
+		n, neg := SignalRef(tc.in)
+		if n != tc.name || neg != tc.neg {
+			t.Errorf("%q -> (%q,%v), want (%q,%v)", tc.in, n, neg, tc.name, tc.neg)
+		}
 	}
 }
 
 // The shipped example is the documentation: if it stops loading, the docs
-// are lying. It also exercises the duration form people actually type.
+// are lying. It also exercises the duration forms people actually type.
 func TestExampleConfigLoads(t *testing.T) {
-	c, err := Load("../../targets.example.yaml")
+	c, err := Load("../../example")
 	if err != nil {
-		t.Fatalf("targets.example.yaml must be valid: %v", err)
+		t.Fatalf("example/ must be valid: %v", err)
 	}
-	m, ok := c.Targets["muscle1"]
-	if !ok {
-		t.Fatal("the example should declare the on-demand node")
+	if len(c.Signals) == 0 || len(c.Targets) == 0 || len(c.Downs) == 0 {
+		t.Fatal("all three directories should have loaded")
 	}
-	if m.DownGrace.D().Minutes() != 10 {
-		t.Errorf("down_grace 10m should parse, got %s", m.DownGrace.D())
+	if c.Targets["pbs"].MinUptime.D() != 25*time.Minute {
+		t.Errorf("pbs min_uptime should be 25m, got %s", c.Targets["pbs"].MinUptime.D())
 	}
-	if c.Targets["console"].IdleAfter.D().Minutes() != 20 {
-		t.Errorf("idle_after 20m should parse, got %s", c.Targets["console"].IdleAfter.D())
+	if !c.Managed("console") || c.Managed("nonexistent") {
+		t.Error("Managed should follow the manages lists")
 	}
-	if c.ReconcileInterval.D().Seconds() != 30 {
-		t.Errorf("reconcile_interval 30s should parse, got %s", c.ReconcileInterval.D())
-	}
-	// defaults filled in where the file says nothing
-	if c.Targets["pbs"].MaxHold.D().Hours() != 6 {
-		t.Errorf("pbs caps holds at 6h, got %s", c.Targets["pbs"].MaxHold.D())
-	}
-	if c.Targets["console"].MaxHold.D() != c.DefaultHold.D() {
-		t.Errorf("a target with no max_hold should inherit default_hold, got %s", c.Targets["console"].MaxHold.D())
+	if got := c.Chain("console"); len(got) != 2 || got[0] != "muscle1" {
+		t.Errorf("chain should raise the node first: %v", got)
 	}
 }

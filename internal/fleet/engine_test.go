@@ -2,7 +2,6 @@ package fleet
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -10,35 +9,46 @@ import (
 
 	"github.com/tomblancdev/veilleur/internal/config"
 	"github.com/tomblancdev/veilleur/internal/door"
-	"github.com/tomblancdev/veilleur/internal/store"
+	"github.com/tomblancdev/veilleur/internal/state"
 )
 
-// the lab's own graph, small enough to reason about in a test:
-//
-//	console 5001 ─┐
-//	              ├─ requires ─▶ muscle1 (on-demand node)
-//	pbs     1002 ─┘
+// the lab's own shape: two guests on one on-demand node, plus a guest that
+// Le Veilleur is NOT allowed to stop (started by hand, or by onboot).
 func labConfig() *config.Config {
+	d := func(s string) config.Duration {
+		v, err := time.ParseDuration(s)
+		if err != nil {
+			panic(err)
+		}
+		return config.Duration(v)
+	}
 	c := &config.Config{
-		ReconcileInterval: config.Duration(time.Second),
-		DefaultHold:       config.Duration(8 * time.Hour),
-		DoorCfg:           config.Door{Mode: "mock"},
+		Interval: d("30s"), DoorCfg: config.Door{Mode: "mock"},
+		Signals: map[string]config.Signal{
+			"console_in_use":    {Name: "console_in_use", RunOn: "muscle1", TTL: d("1s")},
+			"pbs_working":       {Name: "pbs_working", RunOn: "muscle1", TTL: d("1s")},
+			"any_guest_running": {Name: "any_guest_running", RunOn: "muscle1", TTL: d("1s")},
+			"human_session":     {Name: "human_session", RunOn: "muscle1", TTL: d("1s")},
+			"cluster_whole":     {Name: "cluster_whole", RunOn: config.AnyControl, TTL: d("1s")},
+		},
 		Targets: map[string]config.Target{
-			"muscle1": {
-				Name: "muscle1", Kind: config.KindNode, Node: "muscle1",
-				OnDemand: true, WOL: true,
-				UpTimeout: config.Duration(2 * time.Minute), DownGrace: config.Duration(10 * time.Minute),
-				Guards: []string{"human_session", "maintenance_lock", "converge_lock", "cluster_whole"},
-			},
-			"pbs": {
-				Name: "pbs", Kind: config.KindGuest, VMID: 1002, Node: "muscle1",
-				Requires: []string{"muscle1"}, DownGrace: config.Duration(time.Minute),
-			},
-			"console": {
-				Name: "console", Kind: config.KindGuest, VMID: 5001, Node: "muscle1",
-				Requires: []string{"muscle1"}, DownGrace: config.Duration(2 * time.Minute),
-				IdleAfter: config.Duration(20 * time.Minute),
-			},
+			"muscle1": {Name: "muscle1", Kind: config.KindNode, Node: "muscle1", OnDemand: true,
+				UpTimeout: d("3m"), MinUptime: d("1m")},
+			"console": {Name: "console", Kind: config.KindGuest, Node: "muscle1", Needs: []string{"muscle1"},
+				UpTimeout: d("3m"), MinUptime: d("1m")},
+			"pbs": {Name: "pbs", Kind: config.KindGuest, Node: "muscle1", Needs: []string{"muscle1"},
+				UpTimeout: d("5m"), MinUptime: d("10m")},
+			// in nobody's `manages` — a guest someone started in the UI
+			"byhand": {Name: "byhand", Kind: config.KindGuest, Node: "muscle1", Needs: []string{"muscle1"},
+				UpTimeout: d("3m"), MinUptime: d("1m")},
+		},
+		Downs: map[string]config.Down{
+			"console": {Name: "console", StopWhen: []string{"!console_in_use", "!hold:console"},
+				Grace: d("2m"), ThenConsider: []string{"muscle1"}, Manages: []string{"console"}},
+			"pbs": {Name: "pbs", StopWhen: []string{"!pbs_working", "!hold:pbs"},
+				Grace: d("1m"), ThenConsider: []string{"muscle1"}, Manages: []string{"pbs"}},
+			"muscle1": {Name: "muscle1", StopWhen: []string{"!any_guest_running", "!human_session", "!hold:muscle1", "cluster_whole"},
+				Grace: d("10m"), Manages: []string{"muscle1", "console", "pbs"}},
 		},
 	}
 	if err := c.Validate(); err != nil {
@@ -50,315 +60,249 @@ func labConfig() *config.Config {
 type harness struct {
 	e  *Engine
 	m  *door.Mock
-	st *store.Store
+	st *state.Store
 	at time.Time
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	st, err := store.Open(t.TempDir())
+	st, err := state.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := door.NewMock("infra1", "apps1", "muscle1")
-	m.AddGuest(1002, "muscle1")
-	m.AddGuest(5001, "muscle1")
-	m.NodesUp["muscle1"] = false // the normal state
-	m.NodeTTYs["muscle1"] = 0
-	m.NodeTTYs["infra1"] = 0
-	m.NodeTTYs["apps1"] = 0
-
 	h := &harness{m: m, st: st, at: time.Date(2026, 9, 12, 21, 0, 0, 0, time.UTC)}
+	// the world: everything down, nobody using anything, cluster whole
+	for _, n := range []string{"muscle1", "console", "pbs", "byhand"} {
+		m.State[n] = 1
+	}
+	m.Signals["console_in_use"] = 1
+	m.Signals["pbs_working"] = 1
+	m.Signals["any_guest_running"] = 1
+	m.Signals["human_session"] = 1
+	m.Signals["cluster_whole"] = 0
+	// raising or dropping a target changes the mock's world, as life would
+	m.OnUp = func(tgt string) { m.SetUp(tgt, true); h.refreshGuests() }
+	m.OnDown = func(tgt string) { m.SetUp(tgt, false); h.refreshGuests() }
+
 	h.e = New(labConfig(), st, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h.e.SetClock(func() time.Time { return h.at })
-	m.Now = func() time.Time { return h.at }
 	return h
 }
 
-func (h *harness) tick()                   { h.e.Reconcile(context.Background()) }
-func (h *harness) advance(d time.Duration) { h.at = h.at.Add(d) }
+// any_guest_running is derived from the mock's world, like the real one.
+func (h *harness) refreshGuests() {
+	running := 1
+	for _, g := range []string{"console", "pbs", "byhand"} {
+		if h.m.State[g] == 0 {
+			running = 0
+		}
+	}
+	h.m.Signals["any_guest_running"] = running
+}
 
-// settle runs the engine as it runs in life: observe, act, wait, observe
-// again. A stop is a request — the guest is seen down on a LATER pass, and
-// only then does the node it lived on start counting its own grace.
+func (h *harness) pass()                    { h.e.Pass(context.Background()) }
+func (h *harness) advance(d time.Duration)  { h.at = h.at.Add(d) }
+func (h *harness) wake(t *testing.T, n string) {
+	t.Helper()
+	if err := h.e.Wake(context.Background(), n, "test"); err != nil {
+		t.Fatalf("wake %s: %v", n, err)
+	}
+}
+
+// settle runs the engine the way it runs in life.
 func (h *harness) settle(steps int, step time.Duration) {
 	for i := 0; i < steps; i++ {
-		h.tick()
+		h.pass()
 		h.advance(step)
 	}
 }
 
-func (h *harness) claim(t *testing.T, target, subject, reason string, release string) store.Claim {
-	t.Helper()
-	c, err := h.st.Take(store.Claim{
-		Subject: subject, Target: target, Reason: reason, Via: "test",
-		Release: release, HeldSince: h.at, LastActive: h.at,
-		Deadline: h.at.Add(8 * time.Hour),
-	})
-	if err != nil {
-		t.Fatal(err)
+// THE CASE THAT LOST A BACKUP. PBS is raised at 02:55 and the job does not
+// start until 03:10; in between, `pbs_working` honestly says no. Without
+// min_uptime the stop path undoes the wake and the datastore is gone when
+// vzdump runs.
+func TestAFreshlyRaisedTargetIsNotIdle(t *testing.T) {
+	h := newHarness(t)
+	h.wake(t, "pbs")
+	if h.m.State["pbs"] != 0 {
+		t.Fatal("pbs should be up after a wake")
 	}
-	return c
+	h.m.Reset()
+	// ten minutes of "no backup task yet" — exactly the 02:55 -> 03:05 gap
+	h.settle(20, 30*time.Second)
+	if h.m.Took("down pbs") {
+		t.Fatal("THE BACKUP BUG: pbs was stopped before its first task could start")
+	}
+	// the job starts, and keeps it up
+	h.m.Signals["pbs_working"] = 0
+	h.settle(4, time.Minute)
+	if h.m.Took("down pbs") {
+		t.Fatal("pbs was stopped while a backup was running")
+	}
+	// the job finishes; now it may go
+	h.m.Signals["pbs_working"] = 1
+	h.settle(10, time.Minute)
+	if !h.m.Took("down pbs") {
+		t.Fatalf("pbs should stop once its work is done; actions=%v", h.m.Actions)
+	}
 }
 
-// The case Tom named: still playing at 06:00 while the backups finish. The
-// node must NOT go to sleep behind the finished backup, and PBS must stop
-// anyway. Nothing here is special-cased — it is refcounting.
+// Tom's 06:00 case: the backups finish while somebody is still playing.
 func TestPlayingThroughTheBackupWindow(t *testing.T) {
 	h := newHarness(t)
-
-	// 21:00 — the play page claims the console.
-	h.claim(t, "console", "tom", "play page: wake it", store.ReleaseExplicit)
-	h.tick()
-	if !h.m.Took("wake muscle1") {
-		t.Fatalf("the tower should have been woken; actions=%v", h.m.Actions)
-	}
-	h.tick() // the node is up now: the guest follows on the next pass
-	if !h.m.Took("start 5001") {
-		t.Fatalf("the console should have been started; actions=%v", h.m.Actions)
-	}
-
-	// 02:55 — the backups claim PBS. The tower is already up: no second wake.
-	h.advance(6 * time.Hour)
+	h.wake(t, "console")
+	h.m.Signals["console_in_use"] = 0 // somebody is streaming
+	h.advance(2 * time.Minute)
+	h.wake(t, "pbs")
+	h.m.Signals["pbs_working"] = 0
+	h.advance(15 * time.Minute)
 	h.m.Reset()
-	backup := h.claim(t, "pbs", "backups", "squat-nightly", store.ReleaseExplicit)
-	h.tick()
-	if h.m.Took("wake muscle1") {
-		t.Error("the tower was already up — it must not be woken again")
-	}
-	if !h.m.Took("start 1002") {
-		t.Fatalf("PBS should have been started; actions=%v", h.m.Actions)
-	}
 
-	// 05:10 — the jobs are done, the backups release. PBS stops; the tower
-	// stays up because the console's claim is still held.
-	h.advance(2*time.Hour + 15*time.Minute)
-	h.m.Reset()
-	if _, err := h.st.Release(backup.ID, "backups"); err != nil {
-		t.Fatal(err)
+	// the jobs finish; PBS may go, the tower may not
+	h.m.Signals["pbs_working"] = 1
+	h.settle(10, time.Minute)
+	if !h.m.Took("down pbs") {
+		t.Fatalf("pbs should stop when its work is done; actions=%v", h.m.Actions)
 	}
-	h.tick()                    // marks pbs unwanted, grace starts
-	h.advance(2 * time.Minute)  // past pbs's 1 min grace
-	h.tick()
-	if !h.m.Took("stop 1002") {
-		t.Fatalf("PBS should have stopped when its claim was released; actions=%v", h.m.Actions)
-	}
-	if h.m.Took("poweroff muscle1") {
+	if h.m.Took("down muscle1") {
 		t.Fatal("THE BUG: the tower slept while somebody was still playing")
 	}
-	if !h.m.NodesUp["muscle1"] {
-		t.Fatal("the tower must still be powered while the console's claim is held")
-	}
 
-	// 06:00 — the old window. Nothing happens, because there is no window.
-	h.advance(50 * time.Minute)
+	// they stop playing; now the whole chain comes down
+	h.m.Signals["console_in_use"] = 1
+	h.settle(30, time.Minute)
+	if !h.m.Took("down console") {
+		t.Fatalf("the console should stop; actions=%v", h.m.Actions)
+	}
+	if !h.m.Took("down muscle1") {
+		t.Fatalf("the tower should follow it down; actions=%v", h.m.Actions)
+	}
+}
+
+// A guest nobody manages is never touched — and it keeps its node up.
+func TestNeverStopsWhatItDoesNotManage(t *testing.T) {
+	h := newHarness(t)
+	h.wake(t, "byhand")
 	h.m.Reset()
-	h.tick()
+	h.settle(40, time.Minute)
+	if h.m.Took("down byhand") {
+		t.Fatal("a guest started by hand must never be stopped")
+	}
+	if h.m.Took("down muscle1") {
+		t.Fatal("a node running an unmanaged guest must stay up")
+	}
+}
+
+// UNKNOWN blocks a stop; it never permits one.
+func TestUnknownBlocksAStop(t *testing.T) {
+	h := newHarness(t)
+	h.wake(t, "console")
+	h.advance(5 * time.Minute)
+	delete(h.m.Signals, "console_in_use") // the question cannot be put
+	h.m.Reset()
+	h.settle(20, time.Minute)
+	if h.m.Took("down console") {
+		t.Fatal("a signal that cannot be answered must block the stop")
+	}
+	for _, v := range h.e.Board().Targets {
+		if v.Name == "console" && v.Blocked != "unknown:console_in_use" {
+			t.Errorf("the board should name the unanswered signal, got %q", v.Blocked)
+		}
+	}
+}
+
+// A blind engine does nothing at all.
+func TestBlindEngineActsOnNothing(t *testing.T) {
+	h := newHarness(t)
+	h.wake(t, "console")
+	h.advance(10 * time.Minute)
+	h.m.Reset()
+	for _, n := range h.m.Known {
+		h.m.Unreachable[n] = true
+	}
+	h.settle(10, time.Minute)
 	if len(h.m.Actions) != 0 {
-		t.Fatalf("06:00 must be an ordinary minute now; actions=%v", h.m.Actions)
-	}
-}
-
-// The evening leak: stop playing at 22:00 and the tower goes to sleep on its
-// own grace, not at 06:00 the next morning.
-func TestTowerSleepsAfterTheEveningNotAtSix(t *testing.T) {
-	h := newHarness(t)
-	c := h.claim(t, "console", "tom", "play page", store.ReleaseExplicit)
-	h.settle(3, time.Minute)
-
-	// 22:00 — done playing.
-	stopped := h.at
-	if _, err := h.st.Release(c.ID, "tom"); err != nil {
-		t.Fatal(err)
-	}
-	h.m.Reset()
-	h.settle(20, 2*time.Minute) // up to 40 simulated minutes
-
-	if !h.m.Took("stop 5001") {
-		t.Fatalf("the console should have stopped; actions=%v", h.m.Actions)
-	}
-	if !h.m.Took("poweroff muscle1") {
-		t.Fatalf("the tower should have powered off within the hour, not at 06:00; actions=%v", h.m.Actions)
-	}
-	// the point of the whole product: no window, no waiting for the morning
-	if slept := h.at.Sub(stopped); slept > time.Hour {
-		t.Fatalf("the tower took %s to sleep — that is the evening leak again", slept)
-	}
-}
-
-// A parent is never stopped while a child still runs, and never started
-// after one: order is the graph's, not the map's.
-func TestOrderParentsUpFirstChildrenDownFirst(t *testing.T) {
-	h := newHarness(t)
-	h.claim(t, "console", "tom", "play", store.ReleaseExplicit)
-	h.tick()
-	if h.m.Took("start 5001") {
-		t.Error("the console must not be started before its node is up")
-	}
-	h.tick()
-	if !h.m.Took("start 5001") {
-		t.Fatal("the console should start once the node is up")
-	}
-
-	// now make everything unwanted at once
-	for _, c := range h.st.All() {
-		if _, err := h.st.Release(c.ID, "test"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	h.m.Reset()
-	h.settle(20, 2*time.Minute)
-
-	stopIdx, offIdx := -1, -1
-	for i, a := range h.m.Actions {
-		if a == "stop 5001" && stopIdx < 0 {
-			stopIdx = i
-		}
-		if a == "poweroff muscle1" && offIdx < 0 {
-			offIdx = i
-		}
-	}
-	if stopIdx < 0 || offIdx < 0 {
-		t.Fatalf("expected both a stop and a poweroff; actions=%v", h.m.Actions)
-	}
-	if stopIdx > offIdx {
-		t.Fatalf("the guest must stop before its node is powered off; actions=%v", h.m.Actions)
-	}
-}
-
-// Fail as-is: with no view of the fleet, the engine touches nothing.
-func TestObserveFailureActsOnNothing(t *testing.T) {
-	h := newHarness(t)
-	h.claim(t, "console", "tom", "play", store.ReleaseExplicit)
-	h.m.ObserveErr = errors.New("the door is shut")
-	h.tick()
-	if len(h.m.Actions) != 0 {
-		t.Fatalf("a blind engine must do nothing; actions=%v", h.m.Actions)
+		t.Fatalf("a blind engine must touch nothing; actions=%v", h.m.Actions)
 	}
 	if ok, _ := h.e.Healthy(); ok {
-		t.Error("health should report the observation failure")
+		t.Error("health should report that nothing could be observed")
 	}
 }
 
-func TestGuardsRefuseToStop(t *testing.T) {
-	cases := []struct {
-		name  string
-		setup func(*harness)
-		guard string
-	}{
-		{"a human is logged in", func(h *harness) { h.m.NodeTTYs["muscle1"] = 1 }, "human_session"},
-		{"we cannot see its ttys", func(h *harness) { h.m.NodeTTYs["muscle1"] = -1 }, "human_session"},
-		{"a maintenance pass holds the lock", func(h *harness) { h.m.Locks["maintenance"] = true }, "maintenance_lock"},
-		{"a converge is running", func(h *harness) { h.m.Locks["converge"] = true }, "converge_lock"},
-		{"the 24/7 pair is short", func(h *harness) { h.m.NodesUp["apps1"] = false }, "cluster_whole"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newHarness(t)
-			c := h.claim(t, "console", "tom", "play", store.ReleaseExplicit)
-			h.settle(3, time.Minute)
-			if _, err := h.st.Release(c.ID, "tom"); err != nil {
-				t.Fatal(err)
-			}
-			tc.setup(h)
-			h.m.Reset()
-			h.settle(20, 2*time.Minute)
-
-			if h.m.Took("poweroff muscle1") {
-				t.Fatalf("guard %s should have refused the poweroff; actions=%v", tc.guard, h.m.Actions)
-			}
-			var blocked string
-			for _, v := range h.e.Board().Targets {
-				if v.Name == "muscle1" {
-					blocked = v.Blocked
-				}
-			}
-			if blocked != "guard:"+tc.guard {
-				t.Errorf("the board should name the guard: got %q, want %q", blocked, "guard:"+tc.guard)
-			}
-		})
-	}
-}
-
-// An HA-managed guest is the HA manager's to stop, never ours — even if
-// somebody declared it as a target.
-func TestNeverStopsAnHAResource(t *testing.T) {
+// The fencing rule, as an ordinary signal.
+func TestClusterNotWholeBlocksTheNode(t *testing.T) {
 	h := newHarness(t)
-	h.m.GuestHA[5001] = true
-	h.m.GuestsUp[5001] = true
-	h.m.NodesUp["muscle1"] = true
-	h.advance(time.Hour)
-	h.tick()
-	if h.m.Took("stop 5001") {
-		t.Fatalf("an HA resource must never be stopped by the watchman; actions=%v", h.m.Actions)
-	}
-}
-
-// Everything expires: a claim past its deadline stops holding its target.
-func TestDeadlineEndsAClaim(t *testing.T) {
-	h := newHarness(t)
-	if _, err := h.st.Take(store.Claim{
-		Subject: "tom", Target: "console", Via: "test", Reason: "short hold",
-		Release: store.ReleaseDeadline, HeldSince: h.at, LastActive: h.at,
-		Deadline: h.at.Add(30 * time.Minute),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	h.tick()
-	h.tick()
-	if !h.m.NodesUp["muscle1"] || !h.m.GuestsUp[5001] {
-		t.Fatal("the claim should have brought both up")
-	}
-	h.advance(31 * time.Minute)
+	h.wake(t, "console")
+	h.advance(5 * time.Minute)
+	h.m.Signals["cluster_whole"] = 1 // a 24/7 node is missing
 	h.m.Reset()
-	h.tick()
-	h.advance(3 * time.Minute)
-	h.tick()
-	if !h.m.Took("stop 5001") {
-		t.Fatalf("an expired claim holds nothing; actions=%v", h.m.Actions)
-	}
-	if h.st.Held(h.at) != nil {
-		t.Error("no claim should still be held")
+	h.settle(40, time.Minute)
+	if h.m.Took("down muscle1") {
+		t.Fatal("the fencing rule must stop the node being powered off")
 	}
 }
 
-// An idle-ruled claim renews while the target reports activity.
-func TestIdleClaimRenewsOnHeartbeat(t *testing.T) {
+// A hold keeps a target up; lifting it lets go.
+func TestHoldKeepsItUpAndLiftingLetsGo(t *testing.T) {
 	h := newHarness(t)
-	c, err := h.st.Take(store.Claim{
-		Subject: "console", Target: "console", Via: "agent", Reason: "session open",
-		Release: store.ReleaseIdle, IdleAfter: 20 * time.Minute,
-		HeldSince: h.at, LastActive: h.at, Deadline: h.at.Add(8 * time.Hour),
-	})
+	h.wake(t, "console")
+	held, err := h.st.Take(state.Hold{Target: "console", By: "tom", Reason: "debugging"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.advance(15 * time.Minute)
-	if _, err := h.st.Heartbeat(c.ID, "agent", h.at, 0); err != nil {
+	h.advance(5 * time.Minute)
+	h.m.Reset()
+	h.settle(30, time.Minute)
+	if h.m.Took("down console") {
+		t.Fatal("a held target must not be stopped")
+	}
+	if _, err := h.st.Release(held.ID, "tom"); err != nil {
 		t.Fatal(err)
 	}
-	h.advance(15 * time.Minute) // 30 min since the claim, 15 since activity
-	if got := len(h.st.Held(h.at)); got != 1 {
-		t.Fatalf("a heartbeat should keep the claim held, got %d held", got)
-	}
-	h.advance(10 * time.Minute) // 25 min of silence
-	if got := len(h.st.Held(h.at)); got != 0 {
-		t.Fatalf("20 min idle should end the claim, got %d held", got)
+	h.m.Reset()
+	h.settle(30, time.Minute)
+	if !h.m.Took("down console") {
+		t.Fatalf("lifting the hold should let it go; actions=%v", h.m.Actions)
 	}
 }
 
-// A watchman that has never looked is not healthy. Before this, snapErr
-// started empty, /healthz answered 200 from boot, and the converge's health
-// gate passed on a service whose door was blocked (found live 2026-08-24).
-func TestNotHealthyBeforeTheFirstObservation(t *testing.T) {
+// hands-off refuses a wake as well as a stop.
+func TestHandsOffRefusesAWake(t *testing.T) {
 	h := newHarness(t)
-	if ok, why := h.e.Healthy(); ok {
-		t.Fatal("health must not say ok before the first successful pass")
-	} else if why == "" {
-		t.Error("and it should say why")
+	if _, err := h.st.Take(state.Hold{Target: "console", By: "tom", Reason: "reinstalling", HandsOff: true}); err != nil {
+		t.Fatal(err)
 	}
-	h.tick()
-	if ok, why := h.e.Healthy(); !ok {
-		t.Fatalf("after a good pass it is healthy, got %q", why)
+	if err := h.e.Wake(context.Background(), "console", "test"); err == nil {
+		t.Fatal("a hands-off target must not be raised")
+	}
+	if h.m.Took("up console") {
+		t.Fatal("and certainly must not be started")
+	}
+}
+
+// Waking raises parents before children, and only what is missing.
+func TestWakeRaisesOnlyWhatIsMissing(t *testing.T) {
+	h := newHarness(t)
+	h.wake(t, "console")
+	var iNode, iGuest = -1, -1
+	for i, a := range h.m.Actions {
+		if a == "up muscle1" {
+			iNode = i
+		}
+		if a == "up console" {
+			iGuest = i
+		}
+	}
+	if iNode < 0 || iGuest < 0 || iNode > iGuest {
+		t.Fatalf("the node must be raised before the guest: %v", h.m.Actions)
+	}
+	h.m.Reset()
+	h.wake(t, "pbs")
+	if h.m.Took("up muscle1") {
+		t.Fatalf("the tower was already up — it must not be raised again: %v", h.m.Actions)
+	}
+	if !h.m.Took("up pbs") {
+		t.Fatal("pbs should have been raised")
 	}
 }

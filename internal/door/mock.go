@@ -4,148 +4,92 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 )
 
-// Mock is an in-memory fleet: a test (and `door.mode: mock` for local
-// hacking) can drive the whole engine without a hypervisor anywhere.
+// Mock is an in-memory fleet: the engine can be driven end to end without a
+// hypervisor anywhere.
 type Mock struct {
 	mu sync.Mutex
 
-	NodesUp   map[string]bool
-	NodeTTYs  map[string]int
-	GuestsUp  map[int]bool
-	GuestNode map[int]string
-	GuestHA   map[int]bool
-	Locks     map[string]bool
-	Total     int
-
-	// ObserveErr makes Observe fail — the "we cannot see the fleet" case,
-	// where the engine must do nothing at all.
-	ObserveErr error
-	// Actions records every side effect, in order, for assertions.
+	// Signals: name -> exit code. Missing = unreachable (UNKNOWN).
+	Signals map[string]int
+	// State: target -> exit code of its `state` probe (0 = up).
+	State map[string]int
+	// Unreachable nodes refuse everything, as a dead door would.
+	Unreachable map[string]bool
+	// Actions records every side effect, in order.
 	Actions []string
-	// Now, when set, is the clock the snapshot is stamped with.
-	Now func() time.Time
+	// OnUp/OnDown let a test model the world changing.
+	OnUp, OnDown func(target string)
+	Known        []string
 }
 
-// NewMock builds a mock with the given nodes (all up) and no guests.
+// NewMock builds an empty fleet.
 func NewMock(nodes ...string) *Mock {
-	m := &Mock{
-		NodesUp:   map[string]bool{},
-		NodeTTYs:  map[string]int{},
-		GuestsUp:  map[int]bool{},
-		GuestNode: map[int]string{},
-		GuestHA:   map[int]bool{},
-		Locks:     map[string]bool{"maintenance": false, "converge": false},
+	return &Mock{
+		Signals: map[string]int{}, State: map[string]int{},
+		Unreachable: map[string]bool{}, Known: nodes,
 	}
-	for _, n := range nodes {
-		m.NodesUp[n] = true
-	}
-	m.Total = len(nodes)
-	return m
 }
 
-// AddGuest declares a guest on a node, initially stopped.
-func (m *Mock) AddGuest(vmid int, node string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.GuestNode[vmid] = node
-	m.GuestsUp[vmid] = false
-}
+// Nodes lists the doors.
+func (m *Mock) Nodes() []string { return m.Known }
 
-func (m *Mock) now() time.Time {
-	if m.Now != nil {
-		return m.Now()
-	}
-	return time.Now()
-}
-
-// Observe returns the mock's current world.
-func (m *Mock) Observe(_ context.Context, localNodes []string) (Snapshot, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.ObserveErr != nil {
-		return Snapshot{}, m.ObserveErr
-	}
-	snap := Snapshot{
-		At:           m.now(),
-		Source:       "mock",
-		Nodes:        map[string]NodeState{},
-		Guests:       map[int]GuestState{},
-		Locks:        map[string]bool{},
-		ClusterTotal: m.Total,
-	}
-	for k, v := range m.Locks {
-		snap.Locks[k] = v
-	}
-	local := map[string]bool{}
-	for _, n := range localNodes {
-		local[n] = true
-	}
-	for name, up := range m.NodesUp {
-		st := NodeState{Online: up, TTYs: -1}
-		if up {
-			// a node that is up answers its own door; the control nodes
-			// always do, and so does any on-demand node we asked about
-			if !local[name] || m.NodeTTYs[name] >= 0 {
-				st.TTYs = m.NodeTTYs[name]
+func (m *Mock) reachable(node string) bool {
+	if node == "any_control" || node == "" {
+		for _, n := range m.Known {
+			if !m.Unreachable[n] {
+				return true
 			}
-			snap.ClusterOnline++
 		}
-		snap.Nodes[name] = st
+		return false
 	}
-	for vmid, node := range m.GuestNode {
-		status := "stopped"
-		if m.GuestsUp[vmid] {
-			status = "running"
+	return !m.Unreachable[node]
+}
+
+// Signal answers a named question.
+func (m *Mock) Signal(_ context.Context, node, name string) (Answer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.reachable(node) {
+		return Answer{}, &ErrUnreachable{Node: node, Err: fmt.Errorf("mock: down")}
+	}
+	code, ok := m.Signals[name]
+	if !ok {
+		return Answer{}, &ErrUnreachable{Node: node, Err: fmt.Errorf("mock: no such signal %q", name)}
+	}
+	return Answer{Node: node, Exit: code}, nil
+}
+
+// Act runs up | down | state.
+func (m *Mock) Act(_ context.Context, node, verb, target string) (Answer, error) {
+	m.mu.Lock()
+	if !m.reachable(node) {
+		m.mu.Unlock()
+		return Answer{}, &ErrUnreachable{Node: node, Err: fmt.Errorf("mock: down")}
+	}
+	switch verb {
+	case "state":
+		code, ok := m.State[target]
+		if !ok {
+			code = 1
 		}
-		snap.Guests[vmid] = GuestState{
-			VMID: vmid, Node: node, Type: "qemu",
-			Status: status, HA: m.GuestHA[vmid],
-			Name: fmt.Sprintf("guest-%d", vmid),
+		m.mu.Unlock()
+		return Answer{Node: node, Exit: code}, nil
+	case "up", "down":
+		m.Actions = append(m.Actions, verb+" "+target)
+		up, down := m.OnUp, m.OnDown
+		m.mu.Unlock()
+		if verb == "up" && up != nil {
+			up(target)
 		}
+		if verb == "down" && down != nil {
+			down(target)
+		}
+		return Answer{Node: node}, nil
 	}
-	return snap, nil
-}
-
-// Wake turns a node on.
-func (m *Mock) Wake(_ context.Context, node string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Actions = append(m.Actions, "wake "+node)
-	m.NodesUp[node] = true
-	return nil
-}
-
-// StartGuest turns a guest on (its node must be up, as in life).
-func (m *Mock) StartGuest(_ context.Context, vmid int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Actions = append(m.Actions, fmt.Sprintf("start %d", vmid))
-	if node, ok := m.GuestNode[vmid]; ok && !m.NodesUp[node] {
-		return fmt.Errorf("mock: node %s is down", node)
-	}
-	m.GuestsUp[vmid] = true
-	return nil
-}
-
-// StopGuest turns a guest off.
-func (m *Mock) StopGuest(_ context.Context, vmid int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Actions = append(m.Actions, fmt.Sprintf("stop %d", vmid))
-	m.GuestsUp[vmid] = false
-	return nil
-}
-
-// PowerOffNode turns a node off.
-func (m *Mock) PowerOffNode(_ context.Context, node string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Actions = append(m.Actions, "poweroff "+node)
-	m.NodesUp[node] = false
-	return nil
+	m.mu.Unlock()
+	return Answer{}, fmt.Errorf("mock: bad verb %q", verb)
 }
 
 // Took reports whether the action happened.
@@ -161,22 +105,15 @@ func (m *Mock) Took(action string) bool {
 }
 
 // Reset clears the action log.
-func (m *Mock) Reset() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Actions = nil
-}
+func (m *Mock) Reset() { m.mu.Lock(); m.Actions = nil; m.mu.Unlock() }
 
-// WakeSenders counts how many senders were used for the last wake — the mock
-// records one action per sender, so a test can assert redundancy.
-func (m *Mock) Count(action string) int {
+// SetUp marks a target up (0) or down (1) in the mock's world.
+func (m *Mock) SetUp(target string, up bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	n := 0
-	for _, a := range m.Actions {
-		if a == action {
-			n++
-		}
+	if up {
+		m.State[target] = 0
+	} else {
+		m.State[target] = 1
 	}
-	return n
 }

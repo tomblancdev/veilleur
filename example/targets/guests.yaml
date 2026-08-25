@@ -1,0 +1,17 @@
+console:
+  kind: guest
+  node: muscle1          # which machine answers for it
+  label: "the games console"
+  needs: [muscle1]       # the WAKE chain, and only the wake chain
+  up_timeout: 3m
+  min_uptime: 10m        # between "raised" and "in use" every signal says no
+
+pbs:
+  kind: guest
+  node: muscle1
+  label: "the backup server"
+  needs: [muscle1]
+  up_timeout: 5m
+  # long on purpose: it boots at 02:57 and its first job starts at 03:10.
+  # Without this the stop path would undo the wake before the job ran.
+  min_uptime: 25m

@@ -1,0 +1,26 @@
+# Le Veilleur — the parts that are not the graph.
+listen: ":8080"
+base_url: "https://veilleur.example.net"
+data_dir: /data
+tz: Europe/Paris
+house: "Le Squat"
+interval: 30s          # how often the world is compared to the signals
+
+auth:
+  user_header: Remote-User
+  groups_header: Remote-Groups
+  admin_groups: [admins]
+  trusted_proxies: ["10.0.0.10"]   # identity headers believed from here ONLY
+  tokens_file: /etc/veilleur/tokens
+
+# The one credential: an ssh key restricted to `squat-veilleur` on every
+# hypervisor. THE NODE HOLDS THE COMMANDS; this only names them.
+door:
+  mode: ssh            # ssh | mock (mock touches nothing)
+  user: root           # the forced command is the restriction, not the account
+  key_file: /etc/veilleur/door_ed25519
+  timeout: 60s
+  hosts:
+    - { node: infra1,  addr: "10.0.0.11:22", control: true, host_key: "ssh-ed25519 AAAA… root@infra1" }
+    - { node: apps1,   addr: "10.0.0.12:22", control: true, host_key: "ssh-ed25519 AAAA… root@apps1" }
+    - { node: muscle1, addr: "10.0.0.13:22", host_key: "ssh-ed25519 AAAA… root@muscle1" }
