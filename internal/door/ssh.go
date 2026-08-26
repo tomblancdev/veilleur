@@ -172,12 +172,21 @@ func (s *SSH) dispatch(ctx context.Context, node, args string) (Answer, error) {
 	return s.run(ctx, node, args)
 }
 
-// Signal asks a named question.
+// Signal asks a named question. Exit 0 is yes, non-zero is no — EXCEPT when
+// the node could not run the question at all, which is UNKNOWN and must never
+// be read as a no (see cannotRun).
 func (s *SSH) Signal(ctx context.Context, node, name string) (Answer, error) {
 	if err := safeName(name); err != nil {
 		return Answer{}, err
 	}
-	return s.dispatch(ctx, node, "signal "+name)
+	ans, err := s.dispatch(ctx, node, "signal "+name)
+	if err != nil {
+		return ans, err
+	}
+	if cannotRun(ans) {
+		return ans, unrunnable(ans)
+	}
+	return ans, nil
 }
 
 // Act runs up | down | state for a target.

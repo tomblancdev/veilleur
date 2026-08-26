@@ -86,6 +86,14 @@ tower:
   own explanation — on stderr, thrown away — never reached anybody. A thing
   that cannot be done has to say so, with its reason, in the time it takes to
   say it.
+- **A door that cannot run the question has not answered it.** Exit 127 is
+  "command not found", not "no". Read as an ordinary non-zero exit it becomes
+  a *confident* no — and the signals that say a machine is in use are exactly
+  the ones that then say it is idle, so a broken door does not make the
+  watchman cautious, it disarms every guard at once. Found live: one stale
+  `authorized_keys` line left pointing at a renamed script, and a stop was
+  decided on a machine with a running guest. UNKNOWN blocks a stop; the door's
+  job is to say UNKNOWN when that is the truth.
 
 ## Holding something up
 

@@ -59,3 +59,48 @@ func TestASilentRefusalStillSaysSomething(t *testing.T) {
 		t.Fatalf("wanted a legible error, got %v", err)
 	}
 }
+
+// The dangerous half of the same rule: a node that CANNOT RUN the question
+// has not answered it. Read as a plain non-zero exit, "command not found"
+// becomes a confident "no" — and the signals that say a machine is in use are
+// exactly the ones that then say it is idle. A broken door must make the
+// watchman blind, never decisive.
+func TestACommandThatCouldNotRunIsUnknownNotNo(t *testing.T) {
+	for _, exit := range []int{126, 127} {
+		ans := Answer{Node: "a-node", Exit: exit, Stderr: "sh: no such file"}
+		if _, err := judge("state", "a-target", ans); err == nil {
+			t.Fatalf("state, exit %d: must be UNKNOWN, not a clean 'down'", exit)
+		}
+		if _, err := judge("up", "a-target", ans); err == nil {
+			t.Fatalf("up, exit %d: must be UNKNOWN", exit)
+		}
+		var unreachable *ErrUnreachable
+		_, err := judge("state", "a-target", ans)
+		if !errorsAs(err, &unreachable) {
+			t.Fatalf("exit %d must be the door's UNKNOWN (ErrUnreachable), got %T", exit, err)
+		}
+	}
+}
+
+// ...and an ordinary "no" must stay an ordinary no, or every idle machine
+// reads as unknown and nothing is ever stopped again.
+func TestAPlainNoIsStillAnAnswer(t *testing.T) {
+	if _, err := judge("state", "a-target", Answer{Node: "a-node", Exit: 1}); err != nil {
+		t.Fatalf("exit 1 on a question is an ANSWER: %v", err)
+	}
+}
+
+func errorsAs(err error, target **ErrUnreachable) bool {
+	for err != nil {
+		if e, ok := err.(*ErrUnreachable); ok {
+			*target = e
+			return true
+		}
+		u, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = u.Unwrap()
+	}
+	return false
+}

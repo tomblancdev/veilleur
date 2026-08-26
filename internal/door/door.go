@@ -102,6 +102,31 @@ func safeVerb(v string) error {
 }
 
 
+// A shell that could not run the thing at all: 127 = not found, 126 = found
+// but not executable. Neither is an answer to anything.
+const (
+	exitNotFound      = 127
+	exitNotExecutable = 126
+)
+
+// cannotRun reports that the door reached the node and the node could not
+// even run the command — which is UNKNOWN, not "no".
+//
+// This is the rule that was missing on 2026-08-26, and it is the dangerous
+// half. A node's door was renamed and one stale authorized_keys line was left
+// behind pointing at the deleted script, so every question asked on that node
+// exited 127. Answer.True() maps every non-zero exit to false, so four
+// signals — "is anybody streaming", "is a backup client talking", "is any
+// guest running", "is a human logged in" — all answered NO, confidently. Each
+// one is a reason to keep that machine up, so a broken door did not make the
+// watchman cautious: it disarmed every guard at once, and a stop was decided
+// on a tower with a virtual machine running on it. The engine already refuses
+// to stop on UNKNOWN; it was never given the chance to, because the door
+// reported a clean answer.
+func cannotRun(ans Answer) bool {
+	return ans.Exit == exitNotFound || ans.Exit == exitNotExecutable
+}
+
 // judge applies the one rule that separates a question from an action.
 //
 // `state` is a QUESTION - "is it up?" - and a non-zero exit is its answer.
@@ -110,6 +135,9 @@ func safeVerb(v string) error {
 // so an action that failed was reported as done and the caller waited for a
 // thing that was never going to happen.
 func judge(verb, target string, ans Answer) (Answer, error) {
+	if cannotRun(ans) {
+		return ans, unrunnable(ans)
+	}
 	if verb == "state" || ans.Exit == 0 {
 		return ans, nil
 	}
@@ -117,4 +145,13 @@ func judge(verb, target string, ans Answer) (Answer, error) {
 		Node: ans.Node, Verb: verb, Target: target,
 		Exit: ans.Exit, Stderr: ans.Stderr,
 	}
+}
+
+// unrunnable turns "the node could not run it" into the door's UNKNOWN.
+func unrunnable(ans Answer) error {
+	msg := strings.TrimSpace(ans.Stderr)
+	if msg == "" {
+		msg = fmt.Sprintf("exit %d", ans.Exit)
+	}
+	return &ErrUnreachable{Node: ans.Node, Err: fmt.Errorf("could not run it: %s", msg)}
 }
