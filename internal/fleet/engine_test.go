@@ -105,6 +105,9 @@ func (h *harness) refreshGuests() {
 }
 
 func (h *harness) pass()                    { h.e.Pass(context.Background()) }
+
+// isUp asks the mock's world, not the engine's opinion of it.
+func (h *harness) isUp(n string) bool { return h.m.State[n] == 0 }
 func (h *harness) advance(d time.Duration)  { h.at = h.at.Add(d) }
 func (h *harness) wake(t *testing.T, n string) {
 	t.Helper()
@@ -439,5 +442,62 @@ func TestAGuestStartingInsideTheTtlStopsThePoweroff(t *testing.T) {
 	h.settle(26, 30*time.Second)
 	if !h.m.Took("down tower") {
 		t.Fatal("the node never slept after the guest went away")
+	}
+}
+
+// A `up` that the node RUNS and REFUSES must fail loudly and immediately —
+// not be recorded as done and then waited out for the whole up_timeout.
+//
+// This is the 2026-08-26 fault: `up console` exited non-zero, said why on
+// stderr, and the watchman treated it as a success. It then polled for three
+// minutes, reported only "did not come up within 3m0s", and the one useful
+// sentence — the node's own words — had been thrown away. A wake that cannot
+// happen must say so with the reason, in the time it takes to say it.
+func TestARefusedActionFailsWithTheNodesOwnWords(t *testing.T) {
+	h := newHarness(t)
+	h.m.Refuses["up console"] = 2
+	h.m.Complains["up console"] = "cannot start: the card is busy"
+
+	err := h.e.Wake(context.Background(), "console", "test")
+	if err == nil {
+		t.Fatal("a refused `up` must fail the wake, not be waited out")
+	}
+	if !strings.Contains(err.Error(), "cannot start: the card is busy") {
+		t.Fatalf("the node's own words must survive to the caller, got: %v", err)
+	}
+	if h.isUp("console") {
+		t.Fatal("a refused action must not leave the target marked up")
+	}
+}
+
+// The other half of the same rule: for a QUESTION a non-zero exit is an
+// answer, not a failure. `state` is how every probe asks "is it up?", and a
+// target that is down answers 1 — which must stay an answer, or the engine
+// goes blind the moment anything is off.
+func TestANonZeroStateIsAnAnswerNotAFailure(t *testing.T) {
+	h := newHarness(t)
+	h.m.State["console"] = 1 // down, and saying so
+	up, known := h.e.probe(context.Background(), "console")
+	if !known {
+		t.Fatal("a `state` that exits non-zero is an ANSWER: the target is known to be down")
+	}
+	if up {
+		t.Fatal("exit 1 means down")
+	}
+}
+
+// A `down` the node refuses must not be recorded as a stop: the target is
+// still running, and marking it down would let the next decision act on a
+// fiction (and, for a node, take its guests with it).
+func TestARefusedStopLeavesTheTargetUp(t *testing.T) {
+	h := newHarness(t)
+	h.wake(t, "console")
+	h.advance(30 * time.Minute)
+	h.m.Refuses["down console"] = 1
+	h.m.Complains["down console"] = "refused: not in this node's allowlist"
+	h.m.Signals["console_in_use"] = 1 // nobody playing → it would be stopped
+	h.pass()
+	if !h.isUp("console") {
+		t.Fatal("a refused `down` must leave the target up — it never went down")
 	}
 }

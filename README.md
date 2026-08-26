@@ -77,6 +77,15 @@ tower:
   seconds after a guest started on it, from an answer that was 60s old and
   perfectly "fresh" by the observing rules. A stop is the one act that cannot
   be taken back, so its last word has to be the current one.
+- **A question and an action must not read an exit code the same way.** For a
+  signal, or for the `state` probe, a non-zero exit is the *answer*: no. For
+  `up` and `down` it is a **refusal** — the node was reached, it ran the
+  command, and it could not do it. These shared one path once, so an action
+  that failed was recorded as having happened: the caller then waited out the
+  whole `up_timeout` and reported only *"did not come up"*, while the node's
+  own explanation — on stderr, thrown away — never reached anybody. A thing
+  that cannot be done has to say so, with its reason, in the time it takes to
+  say it.
 
 ## Holding something up
 

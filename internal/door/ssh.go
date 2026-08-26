@@ -124,17 +124,24 @@ func (s *SSH) run(ctx context.Context, node, args string) (Answer, error) {
 	var out, errb bytes.Buffer
 	sess.Stdout, sess.Stderr = &out, &errb
 	err = sess.Run(args)
-	ans := Answer{Node: node, Stdout: strings.TrimSpace(out.String())}
+	ans := Answer{
+		Node:   node,
+		Stdout: strings.TrimSpace(out.String()),
+		Stderr: strings.TrimSpace(errb.String()),
+	}
 	if err == nil {
 		return ans, nil
 	}
-	// A non-zero exit is an ANSWER (the signal is false), not a failure.
+	// A non-zero exit is an ANSWER for a question (a signal, a `state`
+	// probe): the signal is false. For an ACTION it is a refusal, and Act
+	// turns it into an error - here we only carry the exit and the node's own
+	// words up, instead of dropping them as this used to.
 	var ee *ssh.ExitError
 	if errorAs(err, &ee) {
 		ans.Exit = ee.ExitStatus()
 		return ans, nil
 	}
-	msg := strings.TrimSpace(errb.String())
+	msg := ans.Stderr
 	if msg == "" {
 		msg = err.Error()
 	}
@@ -174,6 +181,13 @@ func (s *SSH) Signal(ctx context.Context, node, name string) (Answer, error) {
 }
 
 // Act runs up | down | state for a target.
+//
+// `state` is a QUESTION: a non-zero exit means "not up" and is returned as an
+// answer. `up` and `down` are ACTIONS: a non-zero exit means the node was
+// reached and refused, which is an error carrying the node's own words. They
+// shared the "non-zero is an answer" path once, and a `up` that failed was
+// therefore recorded as done - the caller waited out its whole up_timeout and
+// could only report that nothing had happened.
 func (s *SSH) Act(ctx context.Context, node, verb, target string) (Answer, error) {
 	if err := safeVerb(verb); err != nil {
 		return Answer{}, err
@@ -181,7 +195,11 @@ func (s *SSH) Act(ctx context.Context, node, verb, target string) (Answer, error
 	if err := safeName(target); err != nil {
 		return Answer{}, err
 	}
-	return s.dispatch(ctx, node, verb+" "+target)
+	ans, err := s.dispatch(ctx, node, verb+" "+target)
+	if err != nil {
+		return ans, err
+	}
+	return judge(verb, target, ans)
 }
 
 // errorAs is errors.As without importing errors twice over.

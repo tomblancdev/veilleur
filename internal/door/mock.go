@@ -26,6 +26,12 @@ type Mock struct {
 	// node's up/down command may report something the watchman must record
 	// (the tower's `down` prints the wake backstop it just armed).
 	Says map[string]string
+	// Refuses: "<verb> <target>" -> exit code, for an action the node runs
+	// and REFUSES. Real ones exist: a hypervisor that cannot start a guest,
+	// a node whose allowlist does not carry that target.
+	Refuses map[string]int
+	// Complains: "<verb> <target>" -> what it says on stderr while refusing.
+	Complains map[string]string
 }
 
 // NewMock builds an empty fleet.
@@ -33,7 +39,8 @@ func NewMock(nodes ...string) *Mock {
 	return &Mock{
 		Signals: map[string]int{}, State: map[string]int{},
 		Unreachable: map[string]bool{}, Known: nodes,
-		Says: map[string]string{},
+		Says:    map[string]string{},
+		Refuses: map[string]int{}, Complains: map[string]string{},
 	}
 }
 
@@ -83,9 +90,21 @@ func (m *Mock) Act(_ context.Context, node, verb, target string) (Answer, error)
 		return Answer{Node: node, Exit: code}, nil
 	case "up", "down":
 		m.Actions = append(m.Actions, verb+" "+target)
+		key := verb + " " + target
 		up, down := m.OnUp, m.OnDown
-		said := m.Says[verb+" "+target]
+		said := m.Says[key]
+		code, refused := m.Refuses[key]
+		grumble := m.Complains[key]
 		m.mu.Unlock()
+		if refused {
+			// the node WAS reached and said no: an error, never a silent
+			// success the caller then waits on
+			ans := Answer{Node: node, Exit: code, Stdout: said, Stderr: grumble}
+			return ans, &ErrActionFailed{
+				Node: node, Verb: verb, Target: target,
+				Exit: code, Stderr: grumble,
+			}
+		}
 		if verb == "up" && up != nil {
 			up(target)
 		}
