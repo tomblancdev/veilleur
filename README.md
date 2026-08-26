@@ -1,4 +1,4 @@
-<p align="center"><img src="ui/static/logo-animated.svg" alt="Le Squat — le veilleur // who needs it up?" width="640"></p>
+<p align="center"><img src="ui/static/logo-animated.svg" alt="le veilleur — who needs it up?" width="640"></p>
 
 # Le Veilleur
 
@@ -31,7 +31,7 @@ has.
 
 ```yaml
 console_in_use:
-  run_on: muscle1        # its NODE. Nothing of ours runs inside a guest.
+  run_on: tower        # its NODE. Nothing of ours runs inside a guest.
   means: "a client is connected, or somebody has a shell on it"
   ttl: 90s
 ```
@@ -45,14 +45,14 @@ autostart flag, or by another service — and a stop chain derived from the
 wake chain cannot see any of them.
 
 ```yaml
-muscle1:
+tower:
   stop_when:
     - "!any_guest_running"   # measured, not inferred from who asked
     - "!human_session"
-    - "!hold:muscle1"
+    - "!hold:tower"
     - "cluster_whole"        # never leave a cluster short - a plain signal
   grace: 10m
-  manages: [muscle1]         # the ONLY things this may stop
+  manages: [tower]         # the ONLY things this may stop
 ```
 
 ## The rules, each one paid for
@@ -106,7 +106,7 @@ prove it against a real session before trusting it.
 ## How it touches machines
 
 One ssh key restricted to one forced command on every hypervisor —
-[`squat-veilleur`](deploy/proxmox/squat-veilleur): `signal <name>`,
+[`veilleur-node`](deploy/proxmox/veilleur-node): `signal <name>`,
 `state <target>`, `up <target>`, `down <target>`, `list`.
 
 **The node holds the commands; Le Veilleur only names them.** Every name is
@@ -137,6 +137,17 @@ No toolchain on the host: `podman run --rm -v "$PWD":/src -w /src golang:1.24-al
 The engine's arithmetic — including the 06:00 case above — is covered in
 [`internal/fleet/engine_test.go`](internal/fleet/engine_test.go) against an
 in-memory fleet. Tags `v*` build and push the image.
+
+## This repo carries no environment
+
+Addresses, hostnames, domains and the house word belong to whoever runs it;
+the only thing crossing between a deployment and this repo is a pinned image
+tag. The example fleet and the tests use the documentation reserves —
+`192.0.2.0/24` (RFC 5737), `example.com` (RFC 2606) — and generic machine
+names (`node-a`, `node-b`, `tower`), so nothing here describes a real fleet.
+Set `house:` and the wordmark is redrawn with it, so the same binary shows
+`LE VEILLEUR` to a stranger and their own word to the people who run it.
+`sh tools/no-environment.sh` enforces it; CI runs it before anything else.
 
 ## License
 

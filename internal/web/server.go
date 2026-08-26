@@ -47,6 +47,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.HandleFunc("GET /openapi.json", s.openapi)
+	// the mark is rendered, not served: the operator's house word goes in it
+	mux.HandleFunc("GET /static/logo-animated.svg", s.mark)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(ui.Static)))
 
 	mux.HandleFunc("GET /api/targets", s.apiTargets)
@@ -65,6 +67,12 @@ func (s *Server) Handler() http.Handler {
 }
 
 // healthz: 503 while the fleet cannot be observed at all.
+func (s *Server) mark(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	_, _ = w.Write(ui.Lockup(s.cfg.House))
+}
+
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	ok, why := s.engine.Healthy()
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -217,7 +225,7 @@ var funcs = template.FuncMap{
 
 const boardHTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="20"><title>Le Veilleur — {{.House}}</title>
+<meta http-equiv="refresh" content="20"><title>Le Veilleur{{with .House}} — {{.}}{{end}}</title>
 <style>
 :root{--bg:#0a0b0e;--fg:#e9e6dc;--dim:#7d8390;--acc:#c8ff00;--up:#c8ff00;--down:#4a4f5a;--warn:#ffb347;--err:#ff6b6b;--line:#1c1f26}
 *{box-sizing:border-box}
@@ -240,7 +248,7 @@ button{cursor:pointer;border-color:#2a2f3a}button:hover{border-color:var(--acc);
 .held{border-left:3px solid var(--warn);padding-left:10px;margin:8px 0}
 code{color:var(--acc)}
 </style></head><body><main>
-<img class="mark" src="/static/logo-animated.svg" alt="Le Squat — le veilleur" width="640" height="200">
+<img class="mark" src="/static/logo-animated.svg" alt="{{with .House}}{{.}} — {{end}}le veilleur" width="640" height="200">
 <div class="top"><span>signed in: <span class="acc">{{.Identity.User}}</span></span>
 <span>observed {{hhmm .Board.At}} · <code>{{.Version}}</code></span></div>
 {{if .Board.ObserveErr}}<p class="err">⚠ {{.Board.ObserveErr}} — nothing will be started or stopped until this clears.</p>{{end}}
@@ -288,5 +296,3 @@ code{color:var(--acc)}
 Only a target Le Veilleur <em>manages</em> is ever stopped — anything else simply keeps its machine up.</p>
 </main></body></html>
 `
-
-

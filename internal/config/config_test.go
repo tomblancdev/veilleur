@@ -21,20 +21,20 @@ func write(t *testing.T, dir, name, body string) {
 func lab(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	write(t, dir, "main.yaml", "house: Le Squat\ninterval: 30s\ndoor: { mode: mock }\n")
+	write(t, dir, "main.yaml", "house: Example House\ninterval: 30s\ndoor: { mode: mock }\n")
 	write(t, dir, "signals/fleet.yaml", `
-console_in_use: { run_on: muscle1, means: "somebody is streaming", ttl: 90s }
-any_guest_running: { run_on: muscle1, means: "a guest is running" }
+console_in_use: { run_on: tower, means: "somebody is streaming", ttl: 90s }
+any_guest_running: { run_on: tower, means: "a guest is running" }
 `)
-	write(t, dir, "targets/muscle1.yaml", `
-muscle1: { kind: node, node: muscle1, on_demand: true, up_timeout: 3m, down_grace: 10m }
+	write(t, dir, "targets/tower.yaml", `
+tower: { kind: node, node: tower, on_demand: true, up_timeout: 3m, down_grace: 10m }
 `)
 	write(t, dir, "targets/console.yaml", `
-console: { kind: guest, node: muscle1, needs: [muscle1], min_uptime: 10m }
+console: { kind: guest, node: tower, needs: [tower], min_uptime: 10m }
 `)
 	write(t, dir, "down/all.yaml", `
-console: { stop_when: ["!console_in_use"], grace: 2m, manages: [console], then_consider: [muscle1] }
-muscle1: { stop_when: ["!any_guest_running"], grace: 10m, manages: [muscle1] }
+console: { stop_when: ["!console_in_use"], grace: 2m, manages: [console], then_consider: [tower] }
+tower: { stop_when: ["!any_guest_running"], grace: 10m, manages: [tower] }
 `)
 	return dir
 }
@@ -54,7 +54,7 @@ func TestLoadsThreeDirectories(t *testing.T) {
 		t.Errorf("min_uptime should parse: %s", c.Targets["console"].MinUptime.D())
 	}
 	// defaults fill in where the file is silent
-	if c.Targets["muscle1"].MinUptime.D() == 0 {
+	if c.Targets["tower"].MinUptime.D() == 0 {
 		t.Error("min_uptime must never be zero — that is the gap that lost a backup")
 	}
 }
@@ -63,7 +63,7 @@ func TestLoadsThreeDirectories(t *testing.T) {
 // be a target, so a 24/7 node cannot be powered off by a typo.
 func TestNodeTargetMustBeOnDemand(t *testing.T) {
 	dir := lab(t)
-	write(t, dir, "targets/infra1.yaml", "infra1: { kind: node, node: infra1 }\n")
+	write(t, dir, "targets/node-a.yaml", "node-a: { kind: node, node: node-a }\n")
 	_, err := Load(dir)
 	if err == nil || !strings.Contains(err.Error(), "on_demand") {
 		t.Fatalf("want an on_demand refusal, got %v", err)
@@ -86,7 +86,7 @@ func TestHoldSignalsNeedNoDeclaration(t *testing.T) {
 	dir := lab(t)
 	write(t, dir, "down/all.yaml", `
 console: { stop_when: ["!console_in_use", "!hold:console"], manages: [console] }
-muscle1: { stop_when: ["!any_guest_running"], manages: [muscle1] }
+tower: { stop_when: ["!any_guest_running"], manages: [tower] }
 `)
 	if _, err := Load(dir); err != nil {
 		t.Fatalf("hold: signals are written by a person, not declared: %v", err)
@@ -104,14 +104,14 @@ func TestRefusesEmptyStopWhen(t *testing.T) {
 
 func TestRefusesCyclesAndUnknownNeeds(t *testing.T) {
 	dir := lab(t)
-	write(t, dir, "targets/console.yaml", "console: { kind: guest, node: muscle1, needs: [nowhere] }\n")
+	write(t, dir, "targets/console.yaml", "console: { kind: guest, node: tower, needs: [nowhere] }\n")
 	if _, err := Load(dir); err == nil {
 		t.Fatal("a needs pointing nowhere must be refused")
 	}
 	dir = lab(t)
 	write(t, dir, "targets/loop.yaml", `
-a: { kind: guest, node: muscle1, needs: [b] }
-b: { kind: guest, node: muscle1, needs: [a] }
+a: { kind: guest, node: tower, needs: [b] }
+b: { kind: guest, node: tower, needs: [a] }
 `)
 	_, err := Load(dir)
 	if err == nil || !strings.Contains(err.Error(), "cycle") {
@@ -121,7 +121,7 @@ b: { kind: guest, node: muscle1, needs: [a] }
 
 func TestDuplicateKeyAcrossFilesIsRefused(t *testing.T) {
 	dir := lab(t)
-	write(t, dir, "targets/again.yaml", "console: { kind: guest, node: muscle1 }\n")
+	write(t, dir, "targets/again.yaml", "console: { kind: guest, node: tower }\n")
 	_, err := Load(dir)
 	if err == nil || !strings.Contains(err.Error(), "declared twice") {
 		t.Fatalf("a silently overridden target is a trap: %v", err)
@@ -133,11 +133,11 @@ func TestManagedAndChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.Managed("console") || !c.Managed("muscle1") {
+	if !c.Managed("console") || !c.Managed("tower") {
 		t.Error("both are named in a manages list")
 	}
 	chain := c.Chain("console")
-	if len(chain) != 2 || chain[0] != "muscle1" || chain[1] != "console" {
+	if len(chain) != 2 || chain[0] != "tower" || chain[1] != "console" {
 		t.Fatalf("the node must come first: %v", chain)
 	}
 }
@@ -171,7 +171,7 @@ func TestExampleConfigLoads(t *testing.T) {
 	if !c.Managed("console") || c.Managed("nonexistent") {
 		t.Error("Managed should follow the manages lists")
 	}
-	if got := c.Chain("console"); len(got) != 2 || got[0] != "muscle1" {
+	if got := c.Chain("console"); len(got) != 2 || got[0] != "tower" {
 		t.Errorf("chain should raise the node first: %v", got)
 	}
 }

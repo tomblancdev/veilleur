@@ -8,7 +8,19 @@ permissions:
   contents: read
   packages: write
 jobs:
+  # This repo is a product anyone can run. Whoever runs it keeps their own
+  # addresses, hostnames, domains and house word in their own configuration;
+  # the only thing crossing between them is a pinned tag. The check names no
+  # house of its own — a denylist of somebody's hostnames would be that
+  # somebody's environment, published here.
+  no-environment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh tools/no-environment.sh
+
   go:
+    needs: [no-environment]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,7 +30,7 @@ jobs:
       - run: go test -race ./...
       - run: CGO_ENABLED=0 go build -trimpath -o /tmp/veilleur ./cmd/veilleur
   image:
-    needs: [go]
+    needs: [no-environment, go]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:

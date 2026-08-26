@@ -5,22 +5,22 @@
 # Nothing of ours runs inside a guest: a guest is observed from its node.
 
 console_in_use:
-  run_on: muscle1
+  run_on: tower
   means: "a client is connected to the console, or somebody has a shell on it"
   ttl: 90s
 
 pbs_working:
-  run_on: muscle1
+  run_on: tower
   means: "the backup server has a task running, or somebody on it"
   ttl: 90s
 
 any_guest_running:
-  run_on: muscle1
+  run_on: tower
   means: "at least one guest is running on the tower — including ones we do not manage"
   ttl: 60s
 
 human_session:
-  run_on: muscle1
+  run_on: tower
   means: "somebody is logged in at a real tty on the tower"
   ttl: 60s
 

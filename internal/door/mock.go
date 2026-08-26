@@ -24,7 +24,7 @@ type Mock struct {
 	Known        []string
 	// Says: "<verb> <target>" -> what that command prints on stdout. A real
 	// node's up/down command may report something the watchman must record
-	// (muscle1's `down` prints the wake backstop it just armed).
+	// (the tower's `down` prints the wake backstop it just armed).
 	Says map[string]string
 }
 

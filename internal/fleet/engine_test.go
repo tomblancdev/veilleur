@@ -28,30 +28,30 @@ func labConfig() *config.Config {
 	c := &config.Config{
 		Interval: d("30s"), DoorCfg: config.Door{Mode: "mock"},
 		Signals: map[string]config.Signal{
-			"console_in_use":    {Name: "console_in_use", RunOn: "muscle1", TTL: d("1s")},
-			"pbs_working":       {Name: "pbs_working", RunOn: "muscle1", TTL: d("1s")},
-			"any_guest_running": {Name: "any_guest_running", RunOn: "muscle1", TTL: d("1s")},
-			"human_session":     {Name: "human_session", RunOn: "muscle1", TTL: d("1s")},
+			"console_in_use":    {Name: "console_in_use", RunOn: "tower", TTL: d("1s")},
+			"pbs_working":       {Name: "pbs_working", RunOn: "tower", TTL: d("1s")},
+			"any_guest_running": {Name: "any_guest_running", RunOn: "tower", TTL: d("1s")},
+			"human_session":     {Name: "human_session", RunOn: "tower", TTL: d("1s")},
 			"cluster_whole":     {Name: "cluster_whole", RunOn: config.AnyControl, TTL: d("1s")},
 		},
 		Targets: map[string]config.Target{
-			"muscle1": {Name: "muscle1", Kind: config.KindNode, Node: "muscle1", OnDemand: true,
+			"tower": {Name: "tower", Kind: config.KindNode, Node: "tower", OnDemand: true,
 				UpTimeout: d("3m"), MinUptime: d("1m")},
-			"console": {Name: "console", Kind: config.KindGuest, Node: "muscle1", Needs: []string{"muscle1"},
+			"console": {Name: "console", Kind: config.KindGuest, Node: "tower", Needs: []string{"tower"},
 				UpTimeout: d("3m"), MinUptime: d("1m")},
-			"pbs": {Name: "pbs", Kind: config.KindGuest, Node: "muscle1", Needs: []string{"muscle1"},
+			"pbs": {Name: "pbs", Kind: config.KindGuest, Node: "tower", Needs: []string{"tower"},
 				UpTimeout: d("5m"), MinUptime: d("10m")},
 			// in nobody's `manages` — a guest someone started in the UI
-			"byhand": {Name: "byhand", Kind: config.KindGuest, Node: "muscle1", Needs: []string{"muscle1"},
+			"byhand": {Name: "byhand", Kind: config.KindGuest, Node: "tower", Needs: []string{"tower"},
 				UpTimeout: d("3m"), MinUptime: d("1m")},
 		},
 		Downs: map[string]config.Down{
 			"console": {Name: "console", StopWhen: []string{"!console_in_use", "!hold:console"},
-				Grace: d("2m"), ThenConsider: []string{"muscle1"}, Manages: []string{"console"}},
+				Grace: d("2m"), ThenConsider: []string{"tower"}, Manages: []string{"console"}},
 			"pbs": {Name: "pbs", StopWhen: []string{"!pbs_working", "!hold:pbs"},
-				Grace: d("1m"), ThenConsider: []string{"muscle1"}, Manages: []string{"pbs"}},
-			"muscle1": {Name: "muscle1", StopWhen: []string{"!any_guest_running", "!human_session", "!hold:muscle1", "cluster_whole"},
-				Grace: d("10m"), Manages: []string{"muscle1", "console", "pbs"}},
+				Grace: d("1m"), ThenConsider: []string{"tower"}, Manages: []string{"pbs"}},
+			"tower": {Name: "tower", StopWhen: []string{"!any_guest_running", "!human_session", "!hold:tower", "cluster_whole"},
+				Grace: d("10m"), Manages: []string{"tower", "console", "pbs"}},
 		},
 	}
 	if err := c.Validate(); err != nil {
@@ -73,10 +73,10 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := door.NewMock("infra1", "apps1", "muscle1")
+	m := door.NewMock("node-a", "node-b", "tower")
 	h := &harness{m: m, st: st, at: time.Date(2026, 9, 12, 21, 0, 0, 0, time.UTC)}
 	// the world: everything down, nobody using anything, cluster whole
-	for _, n := range []string{"muscle1", "console", "pbs", "byhand"} {
+	for _, n := range []string{"tower", "console", "pbs", "byhand"} {
 		m.State[n] = 1
 	}
 	m.Signals["console_in_use"] = 1
@@ -168,7 +168,7 @@ func TestPlayingThroughTheBackupWindow(t *testing.T) {
 	if !h.m.Took("down pbs") {
 		t.Fatalf("pbs should stop when its work is done; actions=%v", h.m.Actions)
 	}
-	if h.m.Took("down muscle1") {
+	if h.m.Took("down tower") {
 		t.Fatal("THE BUG: the tower slept while somebody was still playing")
 	}
 
@@ -178,7 +178,7 @@ func TestPlayingThroughTheBackupWindow(t *testing.T) {
 	if !h.m.Took("down console") {
 		t.Fatalf("the console should stop; actions=%v", h.m.Actions)
 	}
-	if !h.m.Took("down muscle1") {
+	if !h.m.Took("down tower") {
 		t.Fatalf("the tower should follow it down; actions=%v", h.m.Actions)
 	}
 }
@@ -192,7 +192,7 @@ func TestNeverStopsWhatItDoesNotManage(t *testing.T) {
 	if h.m.Took("down byhand") {
 		t.Fatal("a guest started by hand must never be stopped")
 	}
-	if h.m.Took("down muscle1") {
+	if h.m.Took("down tower") {
 		t.Fatal("a node running an unmanaged guest must stay up")
 	}
 }
@@ -241,7 +241,7 @@ func TestClusterNotWholeBlocksTheNode(t *testing.T) {
 	h.m.Signals["cluster_whole"] = 1 // a 24/7 node is missing
 	h.m.Reset()
 	h.settle(40, time.Minute)
-	if h.m.Took("down muscle1") {
+	if h.m.Took("down tower") {
 		t.Fatal("the fencing rule must stop the node being powered off")
 	}
 }
@@ -290,7 +290,7 @@ func TestWakeRaisesOnlyWhatIsMissing(t *testing.T) {
 	h.wake(t, "console")
 	var iNode, iGuest = -1, -1
 	for i, a := range h.m.Actions {
-		if a == "up muscle1" {
+		if a == "up tower" {
 			iNode = i
 		}
 		if a == "up console" {
@@ -302,7 +302,7 @@ func TestWakeRaisesOnlyWhatIsMissing(t *testing.T) {
 	}
 	h.m.Reset()
 	h.wake(t, "pbs")
-	if h.m.Took("up muscle1") {
+	if h.m.Took("up tower") {
 		t.Fatalf("the tower was already up — it must not be raised again: %v", h.m.Actions)
 	}
 	if !h.m.Took("up pbs") {
@@ -347,13 +347,13 @@ func TestWakeAndStopDoNotRaceOnTheSameTarget(t *testing.T) {
 func TestASleepingNodeIsNotDialledForEveryQuestion(t *testing.T) {
 	h := newHarness(t)
 	// the tower is down; everything on it is therefore unanswerable
-	h.m.State["muscle1"] = 1
-	h.m.Unreachable["muscle1"] = true
+	h.m.State["tower"] = 1
+	h.m.Unreachable["tower"] = true
 	h.pass()
 
 	b := h.e.Board()
 	for _, v := range b.Targets {
-		if v.Name == "muscle1" && !v.Known {
+		if v.Name == "tower" && !v.Known {
 			t.Error("the node itself is answered by a CONTROL node and must stay known")
 		}
 		if v.Name == "console" && v.Known {
@@ -370,13 +370,13 @@ func TestASleepingNodeIsNotDialledForEveryQuestion(t *testing.T) {
 	}
 }
 
-// THE CASE THAT COST A NODE (power.md §11.0e). muscle1 sat empty long enough
+// THE CASE THAT COST A NODE (power.md §11.0e). tower sat empty long enough
 // for its 10 minute grace to run, and in the last moments before it fired, a
 // guest started. The decision had been taken from a "no guests" answer that
 // was still inside its ttl — perfectly fresh by the observing rules — so the
 // node powered itself off SIX SECONDS after the guest came up, with the guest
 // on it. Observing may use a cached answer; powering a machine off may not.
-// THE LINE THAT DIED WITH THE MACHINE. muscle1's own `down` command arms the
+// THE LINE THAT DIED WITH THE MACHINE. tower's own `down` command arms the
 // RTC wake backstop and prints the time it armed it — the one thing that says
 // a sleeping tower will wake itself for the backups. That line reached nothing:
 // the arm runs last at shutdown, deliberately, which is long after the log
@@ -388,12 +388,12 @@ func TestTheLastWordOfAStopIsWrittenByTheWatchman(t *testing.T) {
 	var buf bytes.Buffer
 	h.e.log = slog.New(slog.NewTextHandler(&buf, nil))
 	const armed = "wake_backstop 2026-08-26 03:00:00 CEST"
-	h.m.Says["down muscle1"] = armed
+	h.m.Says["down tower"] = armed
 
-	h.wake(t, "muscle1")
+	h.wake(t, "tower")
 	h.settle(30, 30*time.Second)
 
-	if !h.m.Took("down muscle1") {
+	if !h.m.Took("down tower") {
 		t.Fatal("precondition: the node never slept, so it never said anything")
 	}
 	if !strings.Contains(buf.String(), armed) {
@@ -409,11 +409,11 @@ func TestAGuestStartingInsideTheTtlStopsThePoweroff(t *testing.T) {
 	sig.TTL = config.Duration(60 * time.Second)
 	h.e.cfg.Signals["any_guest_running"] = sig
 
-	h.wake(t, "muscle1")
+	h.wake(t, "tower")
 	// empty, and every condition for powering it off agrees. Stop one pass
 	// short of the grace expiring.
 	h.settle(22, 30*time.Second)
-	if h.m.Took("down muscle1") {
+	if h.m.Took("down tower") {
 		t.Fatal("precondition: the node should not have been stopped yet")
 	}
 
@@ -424,11 +424,11 @@ func TestAGuestStartingInsideTheTtlStopsThePoweroff(t *testing.T) {
 
 	h.pass() // the pass where the grace has run and the stop fires
 
-	if h.m.Took("down muscle1") {
+	if h.m.Took("down tower") {
 		t.Fatal("powered the node off with a guest running: the stop path trusted its cache")
 	}
 	for _, v := range h.e.Board().Targets {
-		if v.Name == "muscle1" && v.Blocked != "held-by:!any_guest_running" {
+		if v.Name == "tower" && v.Blocked != "held-by:!any_guest_running" {
 			t.Fatalf("blocked = %q, want held-by:!any_guest_running", v.Blocked)
 		}
 	}
@@ -437,7 +437,7 @@ func TestAGuestStartingInsideTheTtlStopsThePoweroff(t *testing.T) {
 	h.m.SetUp("console", false)
 	h.refreshGuests()
 	h.settle(26, 30*time.Second)
-	if !h.m.Took("down muscle1") {
+	if !h.m.Took("down tower") {
 		t.Fatal("the node never slept after the guest went away")
 	}
 }

@@ -19,7 +19,7 @@ func testAuth(t *testing.T) *Auth {
 	}
 	a, err := New(config.Auth{
 		UserHeader: "Remote-User", GroupsHeader: "Remote-Groups",
-		AdminGroups: []string{"admins"}, TrustedProxies: []string{"10.10.20.33"},
+		AdminGroups: []string{"admins"}, TrustedProxies: []string{"192.0.2.30"},
 		TokensFile: tf,
 	})
 	if err != nil {
@@ -35,11 +35,11 @@ func TestHeadersOnlyFromTheTrustedProxy(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Remote-User", "mallory")
 	req.Header.Set("Remote-Groups", "admins")
-	req.RemoteAddr = "10.10.20.99:1234"
+	req.RemoteAddr = "192.0.2.99:1234"
 	if id := a.Identify(req); id.Role != None {
 		t.Fatalf("an untrusted hop must not be able to assert an identity, got %+v", id)
 	}
-	req.RemoteAddr = "10.10.20.33:1234"
+	req.RemoteAddr = "192.0.2.30:1234"
 	id := a.Identify(req)
 	if !id.IsAdmin() || id.User != "mallory" {
 		t.Fatalf("the proxy's identity should be believed, got %+v", id)
@@ -49,7 +49,7 @@ func TestHeadersOnlyFromTheTrustedProxy(t *testing.T) {
 func TestGroupsDecideAdmin(t *testing.T) {
 	a := testAuth(t)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "10.10.20.33:1234"
+	req.RemoteAddr = "192.0.2.30:1234"
 	req.Header.Set("Remote-User", "alice")
 	req.Header.Set("Remote-Groups", "players,friends")
 	if id := a.Identify(req); id.IsAdmin() || id.Role != Client {

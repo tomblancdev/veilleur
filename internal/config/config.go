@@ -65,7 +65,7 @@ type Target struct {
 	// Le Veilleur arm the machine's RTC alarm before putting it to sleep —
 	// which makes the guarantee that backups happen depend on the very
 	// component you must assume can be compromised. The alarm stays owned by
-	// the machine itself (squat-rtc-alarm, armed at its own shutdown), on
+	// the machine itself (rtc-alarm, armed at its own shutdown), on
 	// hardware Le Veilleur cannot reach. It is the one boundary that does not
 	// trust the watchman at all.
 }
@@ -131,7 +131,7 @@ type Config struct {
 // Load reads main.yaml plus the three directories beneath dir.
 func Load(dir string) (*Config, error) {
 	c := &Config{
-		Listen: ":8080", DataDir: "/data", TZ: "Europe/Paris", House: "Le Squat",
+		Listen: ":8080", DataDir: "/data", TZ: "Europe/Paris", House: "",
 		Interval: Duration(30e9),
 		Auth:     Auth{UserHeader: "Remote-User", GroupsHeader: "Remote-Groups", AdminGroups: []string{"admins"}},
 		DoorCfg:  Door{Mode: "ssh", User: "root", Timeout: Duration(60e9)},

@@ -1,5 +1,5 @@
 #!/bin/sh
-# squat-veilleur — the ONLY thing Le Veilleur's ssh key may run on a node
+# veilleur-node — the ONLY thing Le Veilleur's ssh key may run on a node
 # (forced command in root's authorized_keys):
 #
 #   signal <name>     ask a named question   -> exit code IS the answer
@@ -19,9 +19,9 @@
 set -eu
 
 CONF=${VEILLEUR_COMMANDS:-/etc/veilleur/commands.conf}
-[ -r "$CONF" ] || { echo "squat-veilleur: no command table at $CONF" >&2; exit 3; }
+[ -r "$CONF" ] || { echo "veilleur-node: no command table at $CONF" >&2; exit 3; }
 
-deny() { logger -t squat-veilleur "DENIED: $*"; echo "squat-veilleur: refused: $*" >&2; exit 3; }
+deny() { logger -t veilleur-node "DENIED: $*"; echo "veilleur-node: refused: $*" >&2; exit 3; }
 
 # a name is a bare identifier or nothing at all
 check_name() {
@@ -61,7 +61,7 @@ case "$verb" in
 		check_name "$name"
 		cmd=$(lookup "$verb" "$name")
 		[ -n "$cmd" ] || deny "this node may not '$verb' '$name'"
-		logger -t squat-veilleur "$verb $name"
+		logger -t veilleur-node "$verb $name"
 		sh -c "$cmd"
 		;;
 	list)
@@ -69,7 +69,7 @@ case "$verb" in
 		sed -n 's/^\([a-z]*\):\([A-Za-z0-9_.-]*\)=.*/\1 \2/p' "$CONF" | sort
 		;;
 	*)
-		echo "squat-veilleur: signal <name> | state <target> | up <target> | down <target> | list" >&2
+		echo "veilleur-node: signal <name> | state <target> | up <target> | down <target> | list" >&2
 		exit 3
 		;;
 esac

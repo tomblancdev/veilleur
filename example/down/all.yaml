@@ -9,7 +9,7 @@ console:
     - "!console_in_use"    # a POSITIVE answer that nobody is on it
     - "!hold:console"      # nobody has asked us to keep it
   grace: 2m
-  then_consider: [muscle1] # stopping this may have freed the tower
+  then_consider: [tower] # stopping this may have freed the tower
   manages: [console]
 
 pbs:
@@ -17,15 +17,15 @@ pbs:
     - "!pbs_working"
     - "!hold:pbs"
   grace: 1m
-  then_consider: [muscle1]
+  then_consider: [tower]
   manages: [pbs]
 
-muscle1:
+tower:
   stop_when:
     - "!any_guest_running" # measured — a guest started by hand keeps it up
     - "!human_session"
     - "!converge_running"
-    - "!hold:muscle1"
+    - "!hold:tower"
     - "cluster_whole"      # the fencing rule, as an ordinary signal
   grace: 10m
-  manages: [muscle1]
+  manages: [tower]

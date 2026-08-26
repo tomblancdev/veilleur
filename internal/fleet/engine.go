@@ -123,7 +123,7 @@ func (e *Engine) evalSignal(ctx context.Context, name string) Value {
 // evalSignalFresh asks the node again even if the cached answer is still
 // inside its ttl. The stop path uses it at the moment it fires: an answer
 // that is merely *fresh enough* to observe with is not good enough to power
-// a machine off with. muscle1 was once powered off six seconds after a guest
+// a machine off with. A tower was once powered off six seconds after a guest
 // started, on a reading that was 60s old and still "fresh" (power.md §11.0e).
 func (e *Engine) evalSignalFresh(ctx context.Context, name string) Value {
 	return e.evalSignalAt(ctx, name, true)
@@ -401,7 +401,7 @@ func (e *Engine) considerDown(ctx context.Context, name string) {
 	// And ask every condition ONE more time, fresh. Everything above was
 	// decided from answers up to their ttl old; a stop is the one act we
 	// cannot take back, so the last word must be the current one. This is how
-	// muscle1 came to be powered off six seconds after a guest started: the
+	// A tower came to be powered off six seconds after a guest started: the
 	// grace had run on a "no guests" answer that was already stale when the
 	// decision fired (power.md §11.0e). Costs one round of signals per actual
 	// stop, and stops are rare.
@@ -451,7 +451,7 @@ func (e *Engine) considerDown(ctx context.Context, name string) {
 //
 // The command runs ON the machine being acted upon, and for a stop that
 // machine is seconds from losing power — so its own journal is the one place
-// the line cannot be trusted to survive. muscle1's `down` arms the RTC wake
+// the line cannot be trusted to survive. The tower's `down` arms the RTC wake
 // backstop and prints the time it armed it; that line reached nothing until
 // this existed, because the arm runs last at shutdown, after the log shipper
 // has already been stopped (power.md §11.0f). The last word of a stop is

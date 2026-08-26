@@ -24,15 +24,15 @@ func testServer(t *testing.T) (*Server, *state.Store, *door.Mock) {
 		return config.Duration(v)
 	}
 	cfg := &config.Config{
-		House: "Le Squat", Interval: d("30s"), DoorCfg: config.Door{Mode: "mock"},
+		House: "Example House", Interval: d("30s"), DoorCfg: config.Door{Mode: "mock"},
 		Auth: config.Auth{UserHeader: "Remote-User", GroupsHeader: "Remote-Groups",
-			AdminGroups: []string{"admins"}, TrustedProxies: []string{"10.0.0.10"}},
+			AdminGroups: []string{"admins"}, TrustedProxies: []string{"192.0.2.10"}},
 		Signals: map[string]config.Signal{
-			"console_in_use": {Name: "console_in_use", RunOn: "muscle1", TTL: d("1s")},
+			"console_in_use": {Name: "console_in_use", RunOn: "tower", TTL: d("1s")},
 		},
 		Targets: map[string]config.Target{
-			"muscle1": {Name: "muscle1", Kind: config.KindNode, Node: "muscle1", OnDemand: true, UpTimeout: d("1m"), MinUptime: d("1m")},
-			"console": {Name: "console", Kind: config.KindGuest, Node: "muscle1", Needs: []string{"muscle1"}, UpTimeout: d("1m"), MinUptime: d("1m")},
+			"tower": {Name: "tower", Kind: config.KindNode, Node: "tower", OnDemand: true, UpTimeout: d("1m"), MinUptime: d("1m")},
+			"console": {Name: "console", Kind: config.KindGuest, Node: "tower", Needs: []string{"tower"}, UpTimeout: d("1m"), MinUptime: d("1m")},
 		},
 		Downs: map[string]config.Down{
 			"console": {Name: "console", StopWhen: []string{"!console_in_use"}, Grace: d("2m"), Manages: []string{"console"}},
@@ -45,9 +45,9 @@ func testServer(t *testing.T) (*Server, *state.Store, *door.Mock) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := door.NewMock("muscle1")
+	m := door.NewMock("tower")
 	m.Signals["console_in_use"] = 1
-	m.State["muscle1"], m.State["console"] = 1, 1
+	m.State["tower"], m.State["console"] = 1, 1
 	m.OnUp = func(tgt string) { m.SetUp(tgt, true) }
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	e := fleet.New(cfg, st, m, log)
@@ -55,7 +55,7 @@ func testServer(t *testing.T) (*Server, *state.Store, *door.Mock) {
 }
 
 func asAdmin(r *http.Request) *http.Request {
-	r.RemoteAddr = "10.0.0.10:1234"
+	r.RemoteAddr = "192.0.2.10:1234"
 	r.Header.Set("Remote-User", "tom")
 	r.Header.Set("Remote-Groups", "admins")
 	return r
@@ -70,7 +70,7 @@ func TestBoardIsAdminsOnly(t *testing.T) {
 	}
 	w = httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, asAdmin(httptest.NewRequest(http.MethodGet, "/", nil)))
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "muscle1") {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "tower") {
 		t.Fatalf("an admin should see the board (%d)", w.Code)
 	}
 }
@@ -90,10 +90,10 @@ func TestWakeReturnsTheChain(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Chain) != 2 || body.Chain[0] != "muscle1" {
+	if len(body.Chain) != 2 || body.Chain[0] != "tower" {
 		t.Fatalf("the chain should be node then guest: %v", body.Chain)
 	}
-	if !m.Took("up muscle1") || !m.Took("up console") {
+	if !m.Took("up tower") || !m.Took("up console") {
 		t.Fatalf("both should have been raised: %v", m.Actions)
 	}
 }
@@ -130,7 +130,7 @@ func TestHoldNeedsAReason(t *testing.T) {
 func TestHoldsAreAdminsOnly(t *testing.T) {
 	s, _, _ := testServer(t)
 	r := httptest.NewRequest(http.MethodPost, "/api/holds", strings.NewReader(`{"target":"console","reason":"x"}`))
-	r.RemoteAddr = "10.0.0.10:1234"
+	r.RemoteAddr = "192.0.2.10:1234"
 	r.Header.Set("Remote-User", "alice")
 	r.Header.Set("Remote-Groups", "players")
 	w := httptest.NewRecorder()

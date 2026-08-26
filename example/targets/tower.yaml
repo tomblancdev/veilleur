@@ -1,6 +1,6 @@
-muscle1:
+tower:
   kind: node
-  node: muscle1
+  node: tower
   label: "the on-demand tower"
   on_demand: true        # REQUIRED — a node that has not said this can never be a target
   up_timeout: 3m
